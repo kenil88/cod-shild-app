@@ -111,9 +111,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     variables: {
       name: PLANS[plan].name,
       returnUrl,
-      // test: true lets you approve without a real credit card in development.
-      // Set to false (or remove) before going live.
-      test: true,
+      test: process.env.NODE_ENV !== "production",
       lineItems: [
         {
           plan: {

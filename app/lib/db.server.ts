@@ -1,4 +1,4 @@
-import { PrismaClient } from "@prisma/client";
+import prisma from "../db.server";
 import type {
   CustomerHistory,
   PincodeStats,
@@ -8,9 +8,6 @@ import type {
   OrderInput,
 } from "./riskEngine";
 import { DEFAULT_RULES } from "./riskEngine";
-
-const prisma = new PrismaClient();
-export default prisma;
 
 // ─── getCustomerHistory ───────────────────────────────────────────────────────
 // Builds a CustomerHistory from the orders table.

@@ -198,14 +198,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       updatePincodeStats(shop, order, false),
     ]);
 
-    // Auto-tag
-    if (result.level !== "safe") {
+    // Auto-tag (Starter+ only)
+    if (result.level !== "safe" && billing.plan !== "free") {
       const tag = result.level === "high" ? "cod-high-risk" : "cod-medium-risk";
       await admin.graphql(TAG_MUTATION, { variables: { id: o.id as string, tags: [tag, "cod-shield"] } });
     }
 
-    // Auto-cancel
-    if (result.action === "cancel" && rules.autoCancel) {
+    // Auto-cancel (Growth+ only, high-value orders excluded)
+    const isGrowthPlus = billing.plan === "growth" || billing.plan === "scale";
+    const isHighValue = order.totalPrice >= (rules.highValueThreshold ?? 5000);
+    if (result.action === "cancel" && rules.autoCancel && isGrowthPlus && !isHighValue) {
       await admin.graphql(CANCEL_MUTATION, {
         variables: { orderId: o.id as string, reason: "FRAUD", notifyCustomer: false, restock: true },
       });

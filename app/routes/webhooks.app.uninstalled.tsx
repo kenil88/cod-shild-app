@@ -4,14 +4,18 @@ import db from "../db.server";
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { shop, session, topic } = await authenticate.webhook(request);
+  console.log(`[COD Shield] ${topic} for ${shop}`);
 
-  console.log(`Received ${topic} webhook for ${shop}`);
-
-  // Webhook requests can trigger multiple times and after an app has already been uninstalled.
-  // If this webhook already ran, the session may have been deleted previously.
+  // Delete sessions so the merchant must re-install to get a fresh auth token
   if (session) {
     await db.session.deleteMany({ where: { shop } });
   }
 
-  return new Response();
+  // Soft-deactivate the merchant row — full erasure happens via shop/redact (90 days later)
+  await db.merchant.updateMany({
+    where: { shopDomain: shop },
+    data: { isActive: false },
+  });
+
+  return new Response(null, { status: 200 });
 };

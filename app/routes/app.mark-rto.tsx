@@ -22,6 +22,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const order = await prisma.codOrder.findUnique({ where: { id: codOrderId } });
   if (!order) return { ok: false };
 
+  // Security: only the shop that owns this order may mark it
+  if (order.shopDomain !== session.shop) return { ok: false };
+
   // Mark order as RTO confirmed
   await prisma.codOrder.update({
     where: { id: codOrderId },

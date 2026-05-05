@@ -1,4 +1,4 @@
-import prisma from "./db.server";
+import prisma from "../db.server";
 import { PLANS, type PlanKey } from "./plans";
 
 export { PLANS, type PlanKey };
