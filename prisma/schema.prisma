@@ -1,0 +1,67 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Session {
+  id            String    @id
+  shop          String
+  state         String
+  isOnline      Boolean   @default(false)
+  scope         String?
+  expires       DateTime?
+  accessToken   String
+  userId        BigInt?
+  firstName     String?
+  lastName      String?
+  email         String?
+  accountOwner  Boolean   @default(false)
+  locale        String?
+  collaborator  Boolean?  @default(false)
+  emailVerified Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+}
+
+model OrderRisk {
+  id               String   @id @default(uuid())
+  orderId          String
+  shopifyOrderGid  String?
+  shopifyCustomerGid String?
+  rtoConfirmed     Boolean  @default(false)
+  score            Int
+  level            String
+  recommendation   String
+  createdAt        DateTime @default(now())
+}
+
+model Customer {
+  id        String  @id
+  phone     String?
+  pastRTO   Boolean @default(false)
+  createdAt DateTime @default(now())
+}
+
+model Address {
+  id        String   @id @default(uuid())
+  phone     String
+  address   String
+  createdAt DateTime @default(now())
+}
+
+model IPLog {
+  id        String   @id @default(uuid())
+  ip        String
+  createdAt DateTime @default(now())
+}
+
+model AppSettings {
+  id            String  @id @default("default")
+  highThreshold Int     @default(70)
+  medThreshold  Int     @default(40)
+  autoCancel    Boolean @default(false)
+}
