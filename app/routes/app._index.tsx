@@ -19,6 +19,7 @@ import {
   ensureMerchant,
 } from "../lib/db.server";
 import { scoreOrder, type OrderInput, type SignalKey, levelColor } from "../lib/riskEngine";
+import { incrementOrderCount } from "../lib/billing.server";
 import prisma from "../db.server";
 
 // ─── GraphQL ──────────────────────────────────────────────────────────────────
@@ -170,6 +171,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       getPincodeStats(shop, pincode),
       getIpStats(shop, order.ip, 60),
     ]);
+
+    // Check billing limit before scoring
+    const billing = await incrementOrderCount(shop);
+    if (!billing.allowed) {
+      skipped++;
+      break; // stop scanning — merchant is at their plan limit
+    }
 
     const result = scoreOrder(order, customerHistory, pincodeStats, ipStats, rules);
 

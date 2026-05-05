@@ -2,6 +2,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { updateCustomerHistory, updatePincodeStats } from "../lib/db.server";
+import { getOrCreateSubscription } from "../lib/billing.server";
 import type { OrderInput } from "../lib/riskEngine";
 
 // ─── RTO detection ────────────────────────────────────────────────────────────
@@ -109,6 +110,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   try {
+    // Auto RTO detection is a Starter+ feature
+    const sub = await getOrCreateSubscription(shop);
+    if (sub.plan === "free") {
+      return new Response(null, { status: 200 });
+    }
+
     // Find the CodOrder we recorded when this order was placed
     const codOrder = await prisma.codOrder.findFirst({
       where: { shopDomain: shop, shopifyOrderId: gid },

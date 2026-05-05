@@ -10,6 +10,7 @@ import {
   ensureMerchant,
 } from "../lib/db.server";
 import { scoreOrder, type OrderInput } from "../lib/riskEngine";
+import { incrementOrderCount } from "../lib/billing.server";
 
 // ─── GraphQL queries / mutations ──────────────────────────────────────────────
 
@@ -176,12 +177,23 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     const order = buildOrderInput(o);
+
+    // 3. Enforce billing plan limit before doing any more work
+    const billing = await incrementOrderCount(shop);
+    if (!billing.allowed) {
+      console.warn(
+        `[COD Shield] ${shop} hit ${billing.plan} plan limit ` +
+          `(${billing.ordersThisMonth}/${billing.limit}) — skipping order #${order.orderNumber}`
+      );
+      return new Response(null, { status: 200 });
+    }
+
     const phone = order.customer?.phone ?? order.shippingAddress?.phone ?? null;
     const email = order.customer?.email ?? null;
     const pincode = order.shippingAddress?.zip ?? null;
     const ip = order.ip ?? null;
 
-    // 3. Fetch all context in parallel — keeps total time < 1s
+    // 5. Fetch all context in parallel — keeps total time < 1s
     const [customerHistory, pincodeStats, ipStats, rules] = await Promise.all([
       getCustomerHistory(shop, phone, email),
       getPincodeStats(shop, pincode),
@@ -189,7 +201,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       getMerchantRules(shop),
     ]);
 
-    // 4. Score the order
+    // 6. Score the order
     const result = scoreOrder(order, customerHistory, pincodeStats, ipStats, rules);
 
     console.log(
@@ -198,15 +210,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         `signals=[${result.triggeredSignals.join(", ")}]`
     );
 
-    // 5. Persist result + update pincode stats in parallel
+    // 7. Persist result + update pincode stats in parallel
     await Promise.all([
       saveRiskResult(shop, order, result),
       updatePincodeStats(shop, order, false),
       ensureMerchant(shop),
     ]);
 
-    // 6. Auto-tag in Shopify
-    if (result.level !== "safe") {
+    // 8. Auto-tag in Shopify (Starter+ only)
+    if (result.level !== "safe" && billing.plan !== "free") {
       const tag =
         result.level === "high" ? "cod-high-risk" : "cod-medium-risk";
       await admin.graphql(TAG_MUTATION, {
@@ -214,8 +226,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       });
     }
 
-    // 7. Auto-cancel if action = cancel and merchant has it enabled
-    if (result.action === "cancel" && rules.autoCancel) {
+    // 9. Auto-cancel if action = cancel and merchant has it enabled (Growth+ only)
+    const isGrowthPlus = billing.plan === "growth" || billing.plan === "scale";
+    if (result.action === "cancel" && rules.autoCancel && isGrowthPlus) {
       const cancelRes = await admin.graphql(CANCEL_MUTATION, {
         variables: {
           orderId: gid,
