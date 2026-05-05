@@ -65,3 +65,112 @@ model AppSettings {
   medThreshold  Int     @default(40)
   autoCancel    Boolean @default(false)
 }
+
+// ─── New tables per spec ───────────────────────────────────────────────────
+
+model Merchant {
+  id         String   @id @default(uuid())
+  shopDomain String   @unique
+  shopName   String?
+  email      String?
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("merchants")
+}
+
+model CodOrder {
+  id              String   @id @default(uuid())
+  shopDomain      String
+  shopifyOrderId  String   // Shopify GID
+  orderNumber     String
+  customerId      String?
+  phone           String?
+  email           String?
+  pincode         String?
+  ip              String?
+  orderValue      Float    @default(0)
+  paymentMethod   String
+  riskScore       Int      @default(0)
+  riskLevel       String   @default("safe") // safe | medium | high
+  action          String   @default("approve") // approve | review | cancel
+  signalsTriggered Json    @default("[]") // string[] of signal keys
+  isBlocked       Boolean  @default(false)
+  rtoConfirmed    Boolean  @default(false)
+  createdAt       DateTime @default(now())
+
+  @@index([shopDomain, createdAt])
+  @@index([shopDomain, phone])
+  @@map("orders")
+}
+
+model Pincode {
+  id          String   @id @default(uuid())
+  shopDomain  String
+  pincode     String
+  totalOrders Int      @default(0)
+  rtoCount    Int      @default(0)
+  rtoRate     Float    @default(0)
+  updatedAt   DateTime @updatedAt
+
+  @@unique([shopDomain, pincode])
+  @@index([shopDomain, rtoRate])
+  @@map("pincodes")
+}
+
+model Rule {
+  id         String  @id @default(uuid())
+  shopDomain String  @unique
+
+  // Signal toggles
+  newCustomer       Boolean @default(true)
+  highRtoPincode    Boolean @default(true)
+  unusualQuantity   Boolean @default(true)
+  nightOrder        Boolean @default(true)
+  incompleteAddress Boolean @default(true)
+  pastRtoHistory    Boolean @default(true)
+  multipleAddresses Boolean @default(true)
+  orderVelocity     Boolean @default(true)
+
+  // Signal weights (0–100, sum normalised to 100 in engine)
+  newCustomerWeight       Int @default(12)
+  highRtoPincodeWeight    Int @default(20)
+  unusualQuantityWeight   Int @default(8)
+  nightOrderWeight        Int @default(3)
+  incompleteAddressWeight Int @default(4)
+  pastRtoHistoryWeight    Int @default(25)
+  multipleAddressesWeight Int @default(10)
+  orderVelocityWeight     Int @default(18)
+
+  // Auto-action config
+  autoCancelThreshold Int     @default(75)
+  autoCancel          Boolean @default(false)
+
+  updatedAt DateTime @updatedAt
+
+  @@map("rules")
+}
+
+model Saving {
+  id         String   @id @default(uuid())
+  shopDomain String
+  orderId    String   // CodOrder.id
+  orderValue Float
+  savedAt    DateTime @default(now())
+
+  @@index([shopDomain, savedAt])
+  @@map("savings")
+}
+
+model IpStat {
+  id         String   @id @default(uuid())
+  shopDomain String
+  ip         String
+  orderCount Int      @default(1)
+  flagCount  Int      @default(0)
+  lastSeenAt DateTime @default(now())
+
+  @@unique([shopDomain, ip])
+  @@map("ip_stats")
+}

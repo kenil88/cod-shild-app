@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npx prisma *)"
+      "Bash(npx prisma *)",
+      "Bash(npx tsc *)",
+      "Bash(grep -E \"app/_index|app\\\\\\\\._index|mark-rto|lib/db|lib/risk\")",
+      "Bash(npm install *)",
+      "Bash(npm test *)"
     ]
   }
 }

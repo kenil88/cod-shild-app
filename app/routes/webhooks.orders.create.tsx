@@ -1,7 +1,17 @@
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
-import db from "../db.server";
-import { scoreOrder, type OrderPayload } from "../risk.server";
+import {
+  getCustomerHistory,
+  getPincodeStats,
+  getIpStats,
+  getMerchantRules,
+  saveRiskResult,
+  updatePincodeStats,
+  ensureMerchant,
+} from "../lib/db.server";
+import { scoreOrder, type OrderInput } from "../lib/riskEngine";
+
+// ─── GraphQL queries / mutations ──────────────────────────────────────────────
 
 const ORDER_QUERY = `#graphql
   query GetOrder($id: ID!) {
@@ -9,18 +19,24 @@ const ORDER_QUERY = `#graphql
       id
       name
       legacyResourceId
+      createdAt
       paymentGatewayNames
-      totalPriceSet { shopMoney { amount } }
+      totalPriceSet { shopMoney { amount currencyCode } }
       clientIp
+      lineItems(first: 50) {
+        edges { node { quantity } }
+      }
       customer {
         id
         legacyResourceId
         phone
+        email
         numberOfOrders
       }
       shippingAddress {
         address1
         city
+        zip
         provinceCode
         phone
       }
@@ -28,85 +44,198 @@ const ORDER_QUERY = `#graphql
   }
 `;
 
+const TAG_MUTATION = `#graphql
+  mutation TagOrder($id: ID!, $tags: [String!]!) {
+    tagsAdd(id: $id, tags: $tags) {
+      node { id }
+      userErrors { field message }
+    }
+  }
+`;
+
+const CANCEL_MUTATION = `#graphql
+  mutation CancelOrder(
+    $orderId: ID!
+    $reason: OrderCancelReason!
+    $notifyCustomer: Boolean!
+    $restock: Boolean!
+  ) {
+    orderCancel(
+      orderId: $orderId
+      reason: $reason
+      notifyCustomer: $notifyCustomer
+      restock: $restock
+    ) {
+      orderCancelUserErrors { field message }
+    }
+  }
+`;
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+const COD_KEYWORDS = ["cash on delivery", "cod", "pay on delivery", "manual"];
+
+function isCOD(gatewayNames: string[]): boolean {
+  return gatewayNames.some((g) =>
+    COD_KEYWORDS.some((kw) => g.toLowerCase().includes(kw))
+  );
+}
+
+function buildOrderInput(o: Record<string, unknown>): OrderInput {
+  const lineItems = (
+    (o.lineItems as { edges: { node: { quantity: number } }[] })?.edges ?? []
+  ).map((e) => ({ quantity: e.node.quantity }));
+
+  return {
+    shopifyOrderId: o.id as string,
+    orderNumber: ((o.name as string) ?? "").replace("#", ""),
+    paymentMethod: ((o.paymentGatewayNames as string[]) ?? []).join(", "),
+    totalPrice: parseFloat(
+      (o.totalPriceSet as { shopMoney: { amount: string } })?.shopMoney
+        ?.amount ?? "0"
+    ),
+    lineItems,
+    createdAt: (o.createdAt as string) ?? new Date().toISOString(),
+    ip: (o.clientIp as string) ?? null,
+    customer: o.customer
+      ? {
+          id: String(
+            (o.customer as { legacyResourceId: string }).legacyResourceId
+          ),
+          phone:
+            (o.customer as { phone?: string | null }).phone ?? null,
+          email:
+            (o.customer as { email?: string | null }).email ?? null,
+          ordersCount: Number(
+            (o.customer as { numberOfOrders?: number }).numberOfOrders ?? 0
+          ),
+        }
+      : null,
+    shippingAddress: o.shippingAddress
+      ? {
+          address1:
+            (o.shippingAddress as { address1?: string }).address1 ?? null,
+          city: (o.shippingAddress as { city?: string }).city ?? null,
+          zip: (o.shippingAddress as { zip?: string }).zip ?? null,
+          phone:
+            (o.shippingAddress as { phone?: string | null }).phone ?? null,
+        }
+      : null,
+  };
+}
+
+// ─── Webhook action ───────────────────────────────────────────────────────────
+// Shopify requires a 200 response within 5 seconds.
+// All DB queries run in parallel to stay well under that budget.
+
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { topic, shop, payload, admin } = await authenticate.webhook(request);
-  console.log(`[COD Shield] Received ${topic} webhook for ${shop}`);
+  // authenticate.webhook verifies the HMAC signature automatically.
+  // If the signature is invalid it throws, returning a 401.
+  const { topic, shop, payload, admin } =
+    await authenticate.webhook(request);
 
-  // The raw payload only has the order ID (protected fields are redacted).
-  // We re-fetch the full order via the authenticated GraphQL Admin API instead.
-  const rawOrderId = (payload as { admin_graphql_api_id?: string; id?: number })
-    .admin_graphql_api_id;
+  console.log(`[COD Shield] ${topic} for ${shop}`);
 
-  if (!rawOrderId || !admin) {
-    console.warn("[COD Shield] Missing order ID or admin client — skipping");
+  const rawPayload = payload as {
+    admin_graphql_api_id?: string;
+    payment_gateway_names?: string[];
+  };
+
+  // Fast-path: skip non-COD orders without any DB calls
+  const gatewayNamesFromPayload = rawPayload.payment_gateway_names ?? [];
+  if (
+    gatewayNamesFromPayload.length > 0 &&
+    !isCOD(gatewayNamesFromPayload)
+  ) {
+    console.log(`[COD Shield] Skipping prepaid order for ${shop}`);
+    return new Response(null, { status: 200 });
+  }
+
+  const gid = rawPayload.admin_graphql_api_id;
+  if (!gid || !admin) {
+    console.warn("[COD Shield] Missing GID or admin client");
     return new Response(null, { status: 200 });
   }
 
   try {
-    const res = await admin.graphql(ORDER_QUERY, {
-      variables: { id: rawOrderId },
-    });
+    // 1. Fetch full order via authenticated GraphQL (protected data approved)
+    const res = await admin.graphql(ORDER_QUERY, { variables: { id: gid } });
     const { data } = await res.json();
-    const o = data?.order;
+    const o = data?.order as Record<string, unknown> | null;
 
     if (!o) {
-      console.warn(`[COD Shield] Could not fetch order ${rawOrderId}`);
+      console.warn(`[COD Shield] Could not fetch order ${gid}`);
       return new Response(null, { status: 200 });
     }
 
-    const orderPayload: OrderPayload = {
-      id: Number(o.legacyResourceId),
-      order_number: Number(o.name?.replace("#", "") ?? o.legacyResourceId),
-      payment_gateway: (o.paymentGatewayNames ?? []).join(", "),
-      total_price: o.totalPriceSet?.shopMoney?.amount ?? "0",
-      browser_ip: o.clientIp ?? null,
-      customer: o.customer
-        ? {
-            id: Number(o.customer.legacyResourceId),
-            phone: o.customer.phone ?? null,
-            orders_count: Number(o.customer.numberOfOrders ?? 0),
-          }
-        : null,
-      shipping_address: o.shippingAddress
-        ? {
-            address1: o.shippingAddress.address1 ?? "",
-            city: o.shippingAddress.city ?? "",
-            province: o.shippingAddress.provinceCode ?? "",
-            phone: o.shippingAddress.phone ?? null,
-          }
-        : null,
-    };
+    // 2. Confirm COD from full order data
+    const gatewayNames = (o.paymentGatewayNames as string[]) ?? [];
+    if (!isCOD(gatewayNames)) {
+      console.log(`[COD Shield] Prepaid order — skipping`);
+      return new Response(null, { status: 200 });
+    }
 
-    const { score, level, recommendation } = await scoreOrder(orderPayload);
+    const order = buildOrderInput(o);
+    const phone = order.customer?.phone ?? order.shippingAddress?.phone ?? null;
+    const email = order.customer?.email ?? null;
+    const pincode = order.shippingAddress?.zip ?? null;
+    const ip = order.ip ?? null;
 
-    await db.orderRisk.create({
-      data: {
-        orderId: String(orderPayload.order_number),
-        score,
-        level,
-        recommendation,
-      },
-    });
+    // 3. Fetch all context in parallel — keeps total time < 1s
+    const [customerHistory, pincodeStats, ipStats, rules] = await Promise.all([
+      getCustomerHistory(shop, phone, email),
+      getPincodeStats(shop, pincode),
+      getIpStats(shop, ip, 60),
+      getMerchantRules(shop),
+    ]);
 
-    if (o.customer?.legacyResourceId) {
-      await db.customer.upsert({
-        where: { id: String(o.customer.legacyResourceId) },
-        create: {
-          id: String(o.customer.legacyResourceId),
-          phone: o.customer.phone ?? null,
-          pastRTO: false,
-        },
-        update: {
-          phone: o.customer.phone ?? undefined,
-        },
+    // 4. Score the order
+    const result = scoreOrder(order, customerHistory, pincodeStats, ipStats, rules);
+
+    console.log(
+      `[COD Shield] #${order.orderNumber} score=${result.score} ` +
+        `level=${result.level} action=${result.action} ` +
+        `signals=[${result.triggeredSignals.join(", ")}]`
+    );
+
+    // 5. Persist result + update pincode stats in parallel
+    await Promise.all([
+      saveRiskResult(shop, order, result),
+      updatePincodeStats(shop, order, false),
+      ensureMerchant(shop),
+    ]);
+
+    // 6. Auto-tag in Shopify
+    if (result.level !== "safe") {
+      const tag =
+        result.level === "high" ? "cod-high-risk" : "cod-medium-risk";
+      await admin.graphql(TAG_MUTATION, {
+        variables: { id: gid, tags: [tag, "cod-shield"] },
       });
     }
 
-    console.log(
-      `[COD Shield] Order #${orderPayload.order_number} → score=${score} level=${level}`
-    );
+    // 7. Auto-cancel if action = cancel and merchant has it enabled
+    if (result.action === "cancel" && rules.autoCancel) {
+      const cancelRes = await admin.graphql(CANCEL_MUTATION, {
+        variables: {
+          orderId: gid,
+          reason: "FRAUD",
+          notifyCustomer: false,
+          restock: true,
+        },
+      });
+      const cancelData = await cancelRes.json();
+      const errors =
+        cancelData?.data?.orderCancel?.orderCancelUserErrors ?? [];
+      if (errors.length > 0) {
+        console.error("[COD Shield] Cancel errors:", errors);
+      } else {
+        console.log(`[COD Shield] Auto-cancelled order #${order.orderNumber}`);
+      }
+    }
   } catch (err) {
-    console.error("[COD Shield] Error processing order webhook:", err);
+    // Log but always return 200 — Shopify retries on non-200
+    console.error("[COD Shield] Webhook error:", err);
   }
 
   return new Response(null, { status: 200 });

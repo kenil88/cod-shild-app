@@ -1,6 +1,7 @@
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
+import { updateCustomerHistory, updatePincodeStats } from "../lib/db.server";
 
 const TAG_MUTATION = `#graphql
   mutation TagOrder($id: ID!, $tags: [String!]!) {
@@ -12,42 +13,43 @@ const TAG_MUTATION = `#graphql
 `;
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { admin } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const form = await request.formData();
+  const codOrderId = String(form.get("codOrderId") ?? "");
 
-  const riskId = String(form.get("riskId") ?? "");
-  const shopifyOrderGid = String(form.get("shopifyOrderGid") ?? "");
-  const shopifyCustomerGid = String(form.get("shopifyCustomerGid") ?? "");
+  if (!codOrderId) return { ok: false };
 
-  if (!riskId) {
-    return { ok: false, error: "Missing riskId" };
-  }
+  const order = await prisma.codOrder.findUnique({ where: { id: codOrderId } });
+  if (!order) return { ok: false };
 
-  // Mark the order risk record as RTO confirmed
-  await prisma.orderRisk.update({
-    where: { id: riskId },
+  // Mark order as RTO confirmed
+  await prisma.codOrder.update({
+    where: { id: codOrderId },
     data: { rtoConfirmed: true },
   });
 
-  // Flag the customer as past RTO so future orders score higher
-  if (shopifyCustomerGid) {
-    const legacyId = shopifyCustomerGid.split("/").pop() ?? "";
-    if (legacyId) {
-      await prisma.customer.upsert({
-        where: { id: legacyId },
-        create: { id: legacyId, pastRTO: true },
-        update: { pastRTO: true },
-      });
-    }
-  }
+  // Build minimal OrderInput for history + pincode updates
+  const orderInput = {
+    shopifyOrderId: order.shopifyOrderId,
+    orderNumber: order.orderNumber,
+    paymentMethod: order.paymentMethod,
+    totalPrice: order.orderValue,
+    lineItems: [],
+    createdAt: order.createdAt.toISOString(),
+    customer: order.customerId ? { id: order.customerId, phone: order.phone, email: order.email, ordersCount: 0 } : null,
+    shippingAddress: order.pincode ? { address1: null, city: null, zip: order.pincode, phone: order.phone } : null,
+    ip: order.ip,
+  };
 
-  // Tag the order in Shopify
-  if (shopifyOrderGid) {
+  await Promise.all([
+    updateCustomerHistory(session.shop, orderInput),
+    updatePincodeStats(session.shop, orderInput, true),
+  ]);
+
+  // Tag order in Shopify
+  if (order.shopifyOrderId) {
     await admin.graphql(TAG_MUTATION, {
-      variables: {
-        id: shopifyOrderGid,
-        tags: ["cod-rto-confirmed", "cod-shield"],
-      },
+      variables: { id: order.shopifyOrderId, tags: ["cod-rto-confirmed", "cod-shield"] },
     });
   }
 

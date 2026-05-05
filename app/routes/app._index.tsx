@@ -3,13 +3,25 @@ import type {
   HeadersFunction,
   LoaderFunctionArgs,
 } from "react-router";
-import { useLoaderData, useFetcher } from "react-router";
-import { useEffect } from "react";
+import { useLoaderData, useFetcher, useRevalidator } from "react-router";
+import { useEffect, useRef, useState } from "react";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
+import {
+  getDashboardStats,
+  getCustomerHistory,
+  getPincodeStats,
+  getIpStats,
+  getMerchantRules,
+  saveRiskResult,
+  updatePincodeStats,
+  ensureMerchant,
+} from "../lib/db.server";
+import { scoreOrder, type OrderInput, type SignalKey, levelColor } from "../lib/riskEngine";
 import prisma from "../db.server";
-import { scoreOrder, type OrderPayload } from "../risk.server";
+
+// ─── GraphQL ──────────────────────────────────────────────────────────────────
 
 const RECENT_ORDERS_QUERY = `#graphql
   query GetRecentOrders {
@@ -19,18 +31,22 @@ const RECENT_ORDERS_QUERY = `#graphql
           id
           name
           legacyResourceId
+          createdAt
           paymentGatewayNames
           totalPriceSet { shopMoney { amount } }
           clientIp
+          lineItems(first: 50) { edges { node { quantity } } }
           customer {
             id
             legacyResourceId
             phone
+            email
             numberOfOrders
           }
           shippingAddress {
             address1
             city
+            zip
             provinceCode
             phone
           }
@@ -40,7 +56,7 @@ const RECENT_ORDERS_QUERY = `#graphql
   }
 `;
 
-const TAG_ORDER_MUTATION = `#graphql
+const TAG_MUTATION = `#graphql
   mutation TagOrder($id: ID!, $tags: [String!]!) {
     tagsAdd(id: $id, tags: $tags) {
       node { id }
@@ -49,7 +65,7 @@ const TAG_ORDER_MUTATION = `#graphql
   }
 `;
 
-const CANCEL_ORDER_MUTATION = `#graphql
+const CANCEL_MUTATION = `#graphql
   mutation CancelOrder($orderId: ID!, $reason: OrderCancelReason!, $notifyCustomer: Boolean!, $restock: Boolean!) {
     orderCancel(orderId: $orderId, reason: $reason, notifyCustomer: $notifyCustomer, restock: $restock) {
       orderCancelUserErrors { field message }
@@ -57,131 +73,122 @@ const CANCEL_ORDER_MUTATION = `#graphql
   }
 `;
 
+const COD_KEYWORDS = ["cash on delivery", "cod", "pay on delivery", "manual"];
+function isCOD(names: string[]) {
+  return names.some((n) => COD_KEYWORDS.some((k) => n.toLowerCase().includes(k)));
+}
+
+// ─── Loader ───────────────────────────────────────────────────────────────────
+
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
+  const shop = session.shop;
 
-  const risks = await prisma.orderRisk.findMany({
-    orderBy: { createdAt: "desc" },
-    take: 50,
-  });
+  const [stats, orders] = await Promise.all([
+    getDashboardStats(shop),
+    prisma.codOrder.findMany({
+      where: { shopDomain: shop },
+      orderBy: { createdAt: "desc" },
+      take: 50,
+      select: {
+        id: true,
+        orderNumber: true,
+        shopifyOrderId: true,
+        riskScore: true,
+        riskLevel: true,
+        action: true,
+        signalsTriggered: true,
+        isBlocked: true,
+        rtoConfirmed: true,
+        orderValue: true,
+        createdAt: true,
+      },
+    }),
+  ]);
 
-  const stats = {
-    total: risks.length,
-    high: risks.filter((r) => r.level === "high").length,
-    medium: risks.filter((r) => r.level === "medium").length,
-    low: risks.filter((r) => r.level === "low").length,
-  };
-
-  return { risks, stats };
+  return { stats, orders, shop };
 };
 
-export const action = async ({ request }: ActionFunctionArgs) => {
-  const { admin } = await authenticate.admin(request);
+// ─── Action (Scan Recent Orders) ──────────────────────────────────────────────
 
-  // Load settings for thresholds and auto-cancel flag
-  const settings = await prisma.appSettings.findUnique({ where: { id: "default" } });
-  const thresholds = {
-    high: settings?.highThreshold ?? 70,
-    med: settings?.medThreshold ?? 40,
-  };
-  const autoCancel = settings?.autoCancel ?? false;
+export const action = async ({ request }: ActionFunctionArgs) => {
+  const { admin, session } = await authenticate.admin(request);
+  const shop = session.shop;
 
   const res = await admin.graphql(RECENT_ORDERS_QUERY);
   const { data } = await res.json();
 
   if (!data?.orders) {
-    return {
-      scanned: 0,
-      skipped: 0,
-      error: "Order access not approved yet. Enable Protected Customer Data in your Shopify Partner Dashboard.",
-    };
+    return { scanned: 0, skipped: 0, error: "Order access not approved. Enable Protected Customer Data in the Shopify Partner Dashboard." };
   }
 
-  const orders = (data.orders.edges ?? []).map(
-    (e: { node: unknown }) => e.node
-  );
+  const rawOrders = (data.orders.edges ?? []).map((e: { node: unknown }) => e.node as Record<string, unknown>);
+  const rules = await getMerchantRules(shop);
+  await ensureMerchant(shop);
 
   let scanned = 0;
   let skipped = 0;
 
-  for (const o of orders) {
-    const orderNum = String(o.name?.replace("#", "") ?? o.legacyResourceId);
+  for (const o of rawOrders) {
+    const gatewayNames = (o.paymentGatewayNames as string[]) ?? [];
+    if (!isCOD(gatewayNames)) { skipped++; continue; }
 
-    const existing = await prisma.orderRisk.findFirst({
-      where: { orderId: orderNum },
-    });
+    const orderNum = ((o.name as string) ?? "").replace("#", "");
+    const existing = await prisma.codOrder.findFirst({ where: { shopDomain: shop, orderNumber: orderNum } });
     if (existing) { skipped++; continue; }
 
-    const payload: OrderPayload = {
-      id: Number(o.legacyResourceId),
-      order_number: Number(orderNum),
-      payment_gateway: (o.paymentGatewayNames ?? []).join(", "),
-      total_price: o.totalPriceSet?.shopMoney?.amount ?? "0",
-      browser_ip: o.clientIp ?? null,
-      customer: o.customer
-        ? {
-            id: Number(o.customer.legacyResourceId),
-            phone: o.customer.phone ?? null,
-            orders_count: Number(o.customer.numberOfOrders ?? 0),
-          }
-        : null,
-      shipping_address: o.shippingAddress
-        ? {
-            address1: o.shippingAddress.address1 ?? "",
-            city: o.shippingAddress.city ?? "",
-            province: o.shippingAddress.provinceCode ?? "",
-            phone: o.shippingAddress.phone ?? null,
-          }
-        : null,
+    const lineItems = ((o.lineItems as { edges: { node: { quantity: number } }[] })?.edges ?? []).map((e) => ({ quantity: e.node.quantity }));
+
+    const order: OrderInput = {
+      shopifyOrderId: o.id as string,
+      orderNumber: orderNum,
+      paymentMethod: gatewayNames.join(", "),
+      totalPrice: parseFloat((o.totalPriceSet as { shopMoney: { amount: string } })?.shopMoney?.amount ?? "0"),
+      lineItems,
+      createdAt: (o.createdAt as string) ?? new Date().toISOString(),
+      ip: (o.clientIp as string) ?? null,
+      customer: o.customer ? {
+        id: String((o.customer as { legacyResourceId: string }).legacyResourceId),
+        phone: (o.customer as { phone?: string | null }).phone ?? null,
+        email: (o.customer as { email?: string | null }).email ?? null,
+        ordersCount: Number((o.customer as { numberOfOrders?: number }).numberOfOrders ?? 0),
+      } : null,
+      shippingAddress: o.shippingAddress ? {
+        address1: (o.shippingAddress as { address1?: string }).address1 ?? null,
+        city: (o.shippingAddress as { city?: string }).city ?? null,
+        zip: (o.shippingAddress as { zip?: string }).zip ?? null,
+        phone: (o.shippingAddress as { phone?: string | null }).phone ?? null,
+      } : null,
     };
 
-    const { score, level, recommendation } = await scoreOrder(payload, thresholds);
+    const phone = order.customer?.phone ?? order.shippingAddress?.phone ?? null;
+    const email = order.customer?.email ?? null;
+    const pincode = order.shippingAddress?.zip ?? null;
 
-    // Save risk record with Shopify GIDs
-    await prisma.orderRisk.create({
-      data: {
-        orderId: orderNum,
-        shopifyOrderGid: o.id ?? null,
-        shopifyCustomerGid: o.customer?.id ?? null,
-        score,
-        level,
-        recommendation,
-      },
-    });
+    const [customerHistory, pincodeStats, ipStats] = await Promise.all([
+      getCustomerHistory(shop, phone, email),
+      getPincodeStats(shop, pincode),
+      getIpStats(shop, order.ip, 60),
+    ]);
 
-    // Upsert customer
-    if (o.customer?.legacyResourceId) {
-      await prisma.customer.upsert({
-        where: { id: String(o.customer.legacyResourceId) },
-        create: {
-          id: String(o.customer.legacyResourceId),
-          phone: o.customer.phone ?? null,
-          pastRTO: false,
-        },
-        update: { phone: o.customer.phone ?? undefined },
-      });
+    const result = scoreOrder(order, customerHistory, pincodeStats, ipStats, rules);
+
+    await Promise.all([
+      saveRiskResult(shop, order, result),
+      updatePincodeStats(shop, order, false),
+    ]);
+
+    // Auto-tag
+    if (result.level !== "safe") {
+      const tag = result.level === "high" ? "cod-high-risk" : "cod-medium-risk";
+      await admin.graphql(TAG_MUTATION, { variables: { id: o.id as string, tags: [tag, "cod-shield"] } });
     }
 
-    if (o.id) {
-      // Auto-tag high/medium risk orders
-      if (level !== "low") {
-        const tag = level === "high" ? "cod-high-risk" : "cod-medium-risk";
-        await admin.graphql(TAG_ORDER_MUTATION, {
-          variables: { id: o.id, tags: [tag, "cod-shield"] },
-        });
-      }
-
-      // Auto-cancel high risk orders if enabled
-      if (level === "high" && autoCancel) {
-        await admin.graphql(CANCEL_ORDER_MUTATION, {
-          variables: {
-            orderId: o.id,
-            reason: "FRAUD",
-            notifyCustomer: false,
-            restock: true,
-          },
-        });
-      }
+    // Auto-cancel
+    if (result.action === "cancel" && rules.autoCancel) {
+      await admin.graphql(CANCEL_MUTATION, {
+        variables: { orderId: o.id as string, reason: "FRAUD", notifyCustomer: false, restock: true },
+      });
     }
 
     scanned++;
@@ -190,191 +197,213 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   return { scanned, skipped, error: null };
 };
 
-function RiskBadge({ level }: { level: string }) {
-  const tone =
-    level === "high" ? "critical" : level === "medium" ? "warning" : "success";
-  return (
-    <s-badge tone={tone}>
-      {level.charAt(0).toUpperCase() + level.slice(1)}
-    </s-badge>
-  );
-}
+// ─── Signal labels ────────────────────────────────────────────────────────────
 
-function ScoreBar({ score }: { score: number }) {
-  const pct = Math.min(100, Math.max(0, score));
-  const color = score >= 70 ? "#d72c0d" : score >= 40 ? "#b98900" : "#1a7a4a";
+const SIGNAL_LABELS: Record<SignalKey, string> = {
+  new_customer: "New customer",
+  high_rto_pincode: "High-RTO pincode",
+  unusual_quantity: "Unusual qty",
+  night_order: "Night order",
+  incomplete_address: "Bad address",
+  past_rto_history: "Past RTO",
+  multiple_addresses: "Multi-address",
+  order_velocity: "High velocity",
+};
+
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
+function ScoreBar({ score, level }: { score: number; level: string }) {
+  const color = levelColor(level as "safe" | "medium" | "high");
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      <div
-        style={{
-          flex: 1,
-          height: 8,
-          borderRadius: 4,
-          background: "#e4e5e7",
-          overflow: "hidden",
-        }}
-      >
-        <div
-          style={{
-            width: `${pct}%`,
-            height: "100%",
-            background: color,
-            borderRadius: 4,
-          }}
-        />
+    <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 130 }}>
+      <div style={{ flex: 1, height: 8, borderRadius: 4, background: "#e4e5e7", overflow: "hidden" }}>
+        <div style={{ width: `${score}%`, height: "100%", background: color, borderRadius: 4, transition: "width 0.3s" }} />
       </div>
-      <span style={{ fontSize: 13, fontWeight: 600, minWidth: 28, color }}>
-        {score}
-      </span>
+      <span style={{ fontSize: 13, fontWeight: 700, minWidth: 26, color }}>{score}</span>
     </div>
   );
 }
 
-function MarkRTOButton({
-  riskId,
-  shopifyOrderGid,
-  shopifyCustomerGid,
-  rtoConfirmed,
-}: {
-  riskId: string;
-  shopifyOrderGid: string | null;
-  shopifyCustomerGid: string | null;
-  rtoConfirmed: boolean;
-}) {
+function LevelBadge({ level }: { level: string }) {
+  const cfg = {
+    high:   { bg: "#ffd2cc", color: "#6d1a13", label: "High" },
+    medium: { bg: "#fff3cd", color: "#7a5900", label: "Medium" },
+    safe:   { bg: "#d3f5e5", color: "#0d4d2e", label: "Safe" },
+  }[level] ?? { bg: "#e4e5e7", color: "#3d4147", label: level };
+
+  return (
+    <span style={{ padding: "3px 10px", borderRadius: 20, fontSize: 12, fontWeight: 700, background: cfg.bg, color: cfg.color }}>
+      {cfg.label}
+    </span>
+  );
+}
+
+function SignalChips({ signals }: { signals: unknown }) {
+  const keys = (Array.isArray(signals) ? signals : []) as SignalKey[];
+  if (keys.length === 0) return <span style={{ color: "#8c9196", fontSize: 12 }}>None</span>;
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+      {keys.map((k) => (
+        <span key={k} style={{ padding: "2px 8px", borderRadius: 12, fontSize: 11, fontWeight: 600, background: "#f1f1f1", color: "#3d4147", whiteSpace: "nowrap" }}>
+          {SIGNAL_LABELS[k] ?? k}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function MarkRTOButton({ orderId, rtoConfirmed }: { orderId: string; rtoConfirmed: boolean }) {
   const fetcher = useFetcher();
-  const isLoading = fetcher.state !== "idle";
+  const busy = fetcher.state !== "idle";
 
   if (rtoConfirmed) {
-    return <s-badge tone="critical">RTO Confirmed</s-badge>;
+    return <span style={{ fontSize: 12, fontWeight: 700, color: "#d72c0d" }}>RTO Confirmed</span>;
   }
 
   return (
     <fetcher.Form method="POST" action="/app/mark-rto">
-      <input type="hidden" name="riskId" value={riskId} />
-      <input type="hidden" name="shopifyOrderGid" value={shopifyOrderGid ?? ""} />
-      <input type="hidden" name="shopifyCustomerGid" value={shopifyCustomerGid ?? ""} />
-      <s-button
-        tone="critical"
-        variant="tertiary"
-        {...(isLoading ? { loading: true } : {})}
-        onClick={(e: React.MouseEvent) => {
-          (e.target as HTMLElement).closest("form")?.requestSubmit();
-        }}
+      <input type="hidden" name="codOrderId" value={orderId} />
+      <button
+        type="submit"
+        disabled={busy}
+        style={{ padding: "4px 10px", borderRadius: 6, border: "1px solid #d72c0d", background: "transparent", color: "#d72c0d", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
       >
-        Mark RTO
-      </s-button>
+        {busy ? "..." : "Mark RTO"}
+      </button>
     </fetcher.Form>
   );
 }
 
-export default function Dashboard() {
-  const { risks, stats } = useLoaderData<typeof loader>();
-  const fetcher = useFetcher<typeof action>();
-  const shopify = useAppBridge();
+// ─── Row background by level ──────────────────────────────────────────────────
 
-  const isScanning =
-    fetcher.state === "submitting" || fetcher.state === "loading";
+function rowBg(level: string, rtoConfirmed: boolean) {
+  if (rtoConfirmed) return "#fff0f0";
+  if (level === "high")   return "#fff8f8";
+  if (level === "medium") return "#fffef0";
+  return "#f8fff9";
+}
+
+// ─── Dashboard page ───────────────────────────────────────────────────────────
+
+const POLL_INTERVAL_MS = 30_000;
+
+export default function Dashboard() {
+  const { stats, orders } = useLoaderData<typeof loader>();
+  const fetcher = useFetcher<typeof action>();
+  const revalidator = useRevalidator();
+  const shopify = useAppBridge();
+  const isScanning = fetcher.state !== "idle";
+  const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Auto-poll: re-fetch loader data every 30 s so new webhook-processed orders appear
+  useEffect(() => {
+    intervalRef.current = setInterval(() => {
+      if (revalidator.state === "idle") {
+        revalidator.revalidate();
+        setLastUpdated(new Date());
+      }
+    }, POLL_INTERVAL_MS);
+
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, [revalidator]);
 
   useEffect(() => {
-    if (fetcher.data && fetcher.state === "idle") {
+    if (fetcher.state === "idle" && fetcher.data) {
       if (fetcher.data.error) {
         shopify.toast.show(fetcher.data.error, { isError: true });
       } else {
-        shopify.toast.show(
-          `Scanned ${fetcher.data.scanned} new orders, ${fetcher.data.skipped} already scored`
-        );
+        shopify.toast.show(`Scanned ${fetcher.data.scanned} orders, ${fetcher.data.skipped} skipped`);
       }
     }
-  }, [fetcher.data, fetcher.state, shopify]);
+  }, [fetcher.state, fetcher.data, shopify]);
 
   return (
     <s-page heading="COD Shield — Risk Dashboard">
-      <s-button
-        slot="primary-action"
-        onClick={() => fetcher.submit({}, { method: "POST" })}
-        {...(isScanning ? { loading: true } : {})}
-      >
-        {isScanning ? "Scanning..." : "Scan Recent Orders"}
-      </s-button>
+      <style>{PULSE_STYLE}</style>
+      {/* Live indicator */}
+      <div slot="primary-action" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#1a7a4a" }}>
+          <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#1a7a4a", display: "inline-block", animation: "pulse 2s infinite" }} />
+          Live · updated {lastUpdated.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+        </span>
+        <s-button
+          onClick={() => fetcher.submit({}, { method: "POST" })}
+          {...(isScanning ? { loading: true } : {})}
+        >
+          {isScanning ? "Scanning..." : "Scan Recent Orders"}
+        </s-button>
+      </div>
 
-      {/* Summary stat cards */}
+      {/* ── Stat cards ── */}
       <s-section>
-        <s-stack direction="inline" gap="base">
-          <StatCard label="Total Analyzed" value={stats.total} color="#616161" />
-          <StatCard label="High Risk" value={stats.high} color="#d72c0d" />
-          <StatCard label="Medium Risk" value={stats.medium} color="#b98900" />
-          <StatCard label="Low Risk" value={stats.low} color="#1a7a4a" />
-        </s-stack>
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+          <StatCard
+            label="Total Analyzed"
+            value={stats.totalOrders}
+            sub="COD orders scored"
+            color="#3d4147"
+            bg="#f6f6f7"
+          />
+          <StatCard
+            label="Blocked Today"
+            value={stats.blockedToday}
+            sub="auto-cancelled"
+            color="#d72c0d"
+            bg="#fff8f8"
+          />
+          <StatCard
+            label="Money Saved"
+            value={`₹${stats.moneySaved.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`}
+            sub="from blocked orders"
+            color="#1a7a4a"
+            bg="#f4fff8"
+          />
+        </div>
       </s-section>
 
-      {/* Orders table */}
+      {/* ── Orders table ── */}
       <s-section heading="Analyzed Orders">
-        {risks.length === 0 ? (
-          <EmptyState
-            onScan={() => fetcher.submit({}, { method: "POST" })}
-            isScanning={isScanning}
-          />
+        {orders.length === 0 ? (
+          <EmptyState onScan={() => fetcher.submit({}, { method: "POST" })} isScanning={isScanning} />
         ) : (
           <div style={{ overflowX: "auto" }}>
-            <table style={tableStyle}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
               <thead>
                 <tr>
-                  {[
-                    "Order",
-                    "Risk Score",
-                    "Risk Level",
-                    "Recommendation",
-                    "Analyzed At",
-                    "Action",
-                  ].map((h) => (
-                    <th key={h} style={thStyle}>
-                      {h}
-                    </th>
+                  {["Order", "Score", "Level", "Signals Triggered", "Date", ""].map((h) => (
+                    <th key={h} style={thStyle}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {risks.map((r, i) => (
-                  <tr
-                    key={r.id}
-                    style={{
-                      background: r.rtoConfirmed
-                        ? "#fff4f4"
-                        : i % 2 === 0
-                          ? "#fff"
-                          : "#f9fafb",
-                    }}
-                  >
+                {orders.map((o) => (
+                  <tr key={o.id} style={{ background: rowBg(o.riskLevel, o.rtoConfirmed) }}>
                     <td style={tdStyle}>
-                      <s-text fontWeight="semibold">#{r.orderId}</s-text>
-                    </td>
-                    <td style={{ ...tdStyle, minWidth: 140 }}>
-                      <ScoreBar score={r.score} />
+                      <div style={{ fontWeight: 700 }}>#{o.orderNumber}</div>
+                      {o.isBlocked && (
+                        <span style={{ fontSize: 11, color: "#d72c0d", fontWeight: 600 }}>BLOCKED</span>
+                      )}
                     </td>
                     <td style={tdStyle}>
-                      <RiskBadge level={r.level} />
+                      <ScoreBar score={o.riskScore} level={o.riskLevel} />
                     </td>
                     <td style={tdStyle}>
-                      <s-text>{r.recommendation}</s-text>
+                      <LevelBadge level={o.riskLevel} />
+                    </td>
+                    <td style={{ ...tdStyle, maxWidth: 280 }}>
+                      <SignalChips signals={o.signalsTriggered} />
+                    </td>
+                    <td style={{ ...tdStyle, whiteSpace: "nowrap", color: "#6d7175" }}>
+                      {new Date(o.createdAt).toLocaleDateString("en-IN", {
+                        day: "2-digit", month: "short", year: "numeric",
+                        hour: "2-digit", minute: "2-digit",
+                      })}
                     </td>
                     <td style={tdStyle}>
-                      <s-text tone="subdued">
-                        {new Date(r.createdAt).toLocaleDateString("en-IN", {
-                          day: "2-digit",
-                          month: "short",
-                          year: "numeric",
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        })}
-                      </s-text>
-                    </td>
-                    <td style={tdStyle}>
-                      <MarkRTOButton
-                        riskId={r.id}
-                        shopifyOrderGid={r.shopifyOrderGid}
-                        shopifyCustomerGid={r.shopifyCustomerGid}
-                        rtoConfirmed={r.rtoConfirmed}
-                      />
+                      <MarkRTOButton orderId={o.id} rtoConfirmed={o.rtoConfirmed} />
                     </td>
                   </tr>
                 ))}
@@ -384,115 +413,79 @@ export default function Dashboard() {
         )}
       </s-section>
 
-      {/* Aside */}
+      {/* ── Aside ── */}
       <s-section slot="aside" heading="Risk Levels">
-        <s-stack direction="block" gap="tight">
-          <s-paragraph>
-            <s-badge tone="critical">High</s-badge>
-            <s-text> Score ≥ 70 — Block or review COD</s-text>
-          </s-paragraph>
-          <s-paragraph>
-            <s-badge tone="warning">Medium</s-badge>
-            <s-text> Score 40–69 — Manual review</s-text>
-          </s-paragraph>
-          <s-paragraph>
-            <s-badge tone="success">Low</s-badge>
-            <s-text> Score &lt; 40 — Allow COD</s-text>
-          </s-paragraph>
-        </s-stack>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <LegendRow color="#d72c0d" bg="#fff8f8" label="High" desc="Score ≥ 60 — cancel / block" />
+          <LegendRow color="#b98900" bg="#fffef0" label="Medium" desc="Score 30–59 — review" />
+          <LegendRow color="#1a7a4a" bg="#f8fff9" label="Safe" desc="Score 0–29 — approve" />
+        </div>
       </s-section>
 
-      <s-section slot="aside" heading="How it works">
-        <s-stack direction="block" gap="tight">
-          <s-paragraph>
-            <s-text>1. Click "Scan Recent Orders" to analyze your last 20 orders</s-text>
-          </s-paragraph>
-          <s-paragraph>
-            <s-text>2. High/medium risk orders are auto-tagged in Shopify</s-text>
-          </s-paragraph>
-          <s-paragraph>
-            <s-text>3. Click "Mark RTO" when a returned order is confirmed — future orders from that customer score higher</s-text>
-          </s-paragraph>
-        </s-stack>
+      <s-section slot="aside" heading="Signals (8)">
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {(Object.entries(SIGNAL_LABELS) as [SignalKey, string][]).map(([key, label]) => (
+            <div key={key} style={{ fontSize: 12, display: "flex", justifyContent: "space-between" }}>
+              <span>{label}</span>
+            </div>
+          ))}
+        </div>
       </s-section>
     </s-page>
   );
 }
 
+// ─── Helper components ────────────────────────────────────────────────────────
+
 function StatCard({
-  label,
-  value,
-  color,
+  label, value, sub, color, bg,
 }: {
-  label: string;
-  value: number;
-  color: string;
+  label: string; value: number | string; sub: string; color: string; bg: string;
 }) {
   return (
-    <div
-      style={{
-        flex: 1,
-        minWidth: 140,
-        padding: "16px 20px",
-        borderRadius: 8,
-        border: "1px solid #e4e5e7",
-        background: "#fff",
-        boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
-      }}
-    >
-      <div style={{ fontSize: 13, color: "#6d7175", marginBottom: 6 }}>
-        {label}
-      </div>
-      <div style={{ fontSize: 32, fontWeight: 700, color }}>{value}</div>
+    <div style={{ flex: 1, minWidth: 160, padding: "18px 20px", borderRadius: 10, background: bg, border: `1px solid ${color}22` }}>
+      <div style={{ fontSize: 12, color: "#6d7175", marginBottom: 4, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>{label}</div>
+      <div style={{ fontSize: 30, fontWeight: 800, color, lineHeight: 1.1 }}>{value}</div>
+      <div style={{ fontSize: 11, color: "#8c9196", marginTop: 4 }}>{sub}</div>
     </div>
   );
 }
 
-function EmptyState({
-  onScan,
-  isScanning,
-}: {
-  onScan: () => void;
-  isScanning: boolean;
-}) {
+function LegendRow({ color, bg, label, desc }: { color: string; bg: string; label: string; desc: string }) {
   return (
-    <div style={{ textAlign: "center", padding: "48px 24px", color: "#6d7175" }}>
-      <div style={{ fontSize: 40, marginBottom: 12 }}>🛡️</div>
-      <s-heading>No orders analyzed yet</s-heading>
-      <s-paragraph>
-        Click the button below to scan your most recent 20 orders.
-      </s-paragraph>
-      <div style={{ marginTop: 16 }}>
-        <s-button onClick={onScan} {...(isScanning ? { loading: true } : {})}>
-          {isScanning ? "Scanning..." : "Scan Recent Orders"}
-        </s-button>
-      </div>
+    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+      <span style={{ padding: "2px 10px", borderRadius: 20, fontSize: 12, fontWeight: 700, background: bg, color, whiteSpace: "nowrap" }}>{label}</span>
+      <span style={{ fontSize: 12, color: "#6d7175" }}>{desc}</span>
     </div>
   );
 }
 
-const tableStyle: React.CSSProperties = {
-  width: "100%",
-  borderCollapse: "collapse",
-  fontSize: 14,
-};
+function EmptyState({ onScan, isScanning }: { onScan: () => void; isScanning: boolean }) {
+  return (
+    <div style={{ textAlign: "center", padding: "56px 24px", color: "#6d7175" }}>
+      <div style={{ fontSize: 48, marginBottom: 12 }}>🛡️</div>
+      <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>No orders analyzed yet</div>
+      <div style={{ fontSize: 14, marginBottom: 20 }}>Click below to scan your last 20 COD orders.</div>
+      <button
+        onClick={onScan}
+        disabled={isScanning}
+        style={{ padding: "10px 24px", borderRadius: 8, background: "#008060", color: "#fff", border: "none", fontSize: 14, fontWeight: 600, cursor: "pointer" }}
+      >
+        {isScanning ? "Scanning..." : "Scan Recent Orders"}
+      </button>
+    </div>
+  );
+}
+
+const PULSE_STYLE = `@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }`;
 
 const thStyle: React.CSSProperties = {
-  textAlign: "left",
-  padding: "10px 14px",
-  background: "#f6f6f7",
-  borderBottom: "2px solid #e4e5e7",
-  fontWeight: 600,
-  color: "#3d4147",
-  whiteSpace: "nowrap",
+  textAlign: "left", padding: "10px 14px", background: "#f6f6f7",
+  borderBottom: "2px solid #e4e5e7", fontWeight: 700, color: "#3d4147", whiteSpace: "nowrap",
 };
 
 const tdStyle: React.CSSProperties = {
-  padding: "12px 14px",
-  borderBottom: "1px solid #e4e5e7",
-  verticalAlign: "middle",
+  padding: "11px 14px", borderBottom: "1px solid #f1f2f3", verticalAlign: "middle",
 };
 
-export const headers: HeadersFunction = (headersArgs) => {
-  return boundary.headers(headersArgs);
-};
+export const headers: HeadersFunction = (headersArgs) => boundary.headers(headersArgs);
