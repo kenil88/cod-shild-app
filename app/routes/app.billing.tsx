@@ -176,6 +176,7 @@ export default function BillingPage() {
     useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const isLoading = fetcher.state !== "idle";
+  const submittedPlan = fetcher.formData?.get("plan") as string | null;
   const error = fetcher.data?.error;
 
   // Escape the Shopify iframe and navigate to Shopify's billing confirmation page
@@ -406,41 +407,46 @@ export default function BillingPage() {
                 {/* CTA */}
                 <fetcher.Form method="POST">
                   <input type="hidden" name="plan" value={key} />
-                  <button
-                    type="submit"
-                    disabled={isCurrent || isLoading}
-                    style={{
-                      width: "100%",
-                      padding: "11px 0",
-                      borderRadius: 8,
-                      background: isCurrent
-                        ? "#e4e5e7"
-                        : key === "free"
-                        ? "#f6f6f7"
-                        : "#008060",
-                      color: isCurrent
-                        ? "#8c9196"
-                        : key === "free"
-                        ? "#6d7175"
-                        : "#fff",
-                      fontWeight: 700,
-                      fontSize: 13,
-                      cursor: isCurrent || isLoading ? "default" : "pointer",
-                      opacity: isLoading && !isCurrent ? 0.75 : 1,
-                      border:
-                        key === "free" && !isCurrent
-                          ? "1px solid #e4e5e7"
-                          : "none",
-                    }}
-                  >
-                    {isCurrent
-                      ? "Current Plan"
-                      : key === "free"
-                      ? "Downgrade to Free"
-                      : isLoading
-                      ? "Redirecting to Shopify..."
-                      : `Upgrade to ${p.name}`}
-                  </button>
+                  {(() => {
+                    const isThisLoading = isLoading && submittedPlan === key;
+                    return (
+                      <button
+                        type="submit"
+                        disabled={isCurrent || isLoading}
+                        style={{
+                          width: "100%",
+                          padding: "11px 0",
+                          borderRadius: 8,
+                          background: isCurrent
+                            ? "#e4e5e7"
+                            : key === "free"
+                            ? "#f6f6f7"
+                            : "#008060",
+                          color: isCurrent
+                            ? "#8c9196"
+                            : key === "free"
+                            ? "#6d7175"
+                            : "#fff",
+                          fontWeight: 700,
+                          fontSize: 13,
+                          cursor: isCurrent || isLoading ? "default" : "pointer",
+                          opacity: isThisLoading ? 0.75 : 1,
+                          border:
+                            key === "free" && !isCurrent
+                              ? "1px solid #e4e5e7"
+                              : "none",
+                        }}
+                      >
+                        {isCurrent
+                          ? "Current Plan"
+                          : key === "free"
+                          ? "Downgrade to Free"
+                          : isThisLoading
+                          ? "Redirecting to Shopify..."
+                          : `Upgrade to ${p.name}`}
+                      </button>
+                    );
+                  })()}
                 </fetcher.Form>
               </div>
             );

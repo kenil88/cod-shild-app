@@ -128,6 +128,7 @@ export async function getMerchantRules(shopDomain: string): Promise<RulesConfig>
     orderVelocityWeight: row.orderVelocityWeight,
     autoCancelThreshold: row.autoCancelThreshold,
     autoCancel: row.autoCancel,
+    highValueThreshold: row.highValueThreshold,
   };
 }
 

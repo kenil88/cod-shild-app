@@ -79,6 +79,7 @@ export interface RulesConfig {
   // action thresholds
   autoCancelThreshold: number;
   autoCancel?: boolean;
+  highValueThreshold?: number; // skip auto-cancel for orders above this ₹ amount
 }
 
 export interface SignalResult {
@@ -116,6 +117,7 @@ export const DEFAULT_RULES: RulesConfig = {
   multipleAddressesWeight: 10,
   orderVelocityWeight: 18,
   autoCancelThreshold: 75,
+  highValueThreshold: 5000,
 };
 
 // ─── Thresholds ────────────────────────────────────────────────────────────────

@@ -69,13 +69,14 @@ model AppSettings {
 // ─── New tables per spec ───────────────────────────────────────────────────
 
 model Merchant {
-  id         String   @id @default(uuid())
-  shopDomain String   @unique
-  shopName   String?
-  email      String?
-  isActive   Boolean  @default(true)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id                  String   @id @default(uuid())
+  shopDomain          String   @unique
+  shopName            String?
+  email               String?
+  isActive            Boolean  @default(true)
+  onboardingCompleted Boolean  @default(false)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
 
   @@map("merchants")
 }
@@ -146,6 +147,7 @@ model Rule {
   // Auto-action config
   autoCancelThreshold Int     @default(75)
   autoCancel          Boolean @default(false)
+  highValueThreshold  Float   @default(5000)  // skip auto-cancel for orders above this ₹ amount
 
   updatedAt DateTime @updatedAt
 

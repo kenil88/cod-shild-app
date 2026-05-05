@@ -9,6 +9,8 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getMerchantRules } from "../lib/db.server";
+import { getOrCreateSubscription } from "../lib/billing.server";
+import { PLANS, type PlanKey } from "../lib/plans";
 import prisma from "../db.server";
 import type { SignalKey } from "../lib/riskEngine";
 
@@ -85,7 +87,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
 
-  const [rules, blockedPhones, blockedAddresses] = await Promise.all([
+  const [rules, blockedPhones, blockedAddresses, sub] = await Promise.all([
     getMerchantRules(shop),
     prisma.address.findMany({
       where: { NOT: { phone: "" } },
@@ -95,9 +97,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       where: { phone: "", NOT: { address: "" } },
       orderBy: { createdAt: "desc" },
     }),
+    getOrCreateSubscription(shop),
   ]);
 
-  return { rules, blockedPhones, blockedAddresses, shop };
+  const plan = (sub.plan in PLANS ? sub.plan : "free") as PlanKey;
+  const limit = PLANS[plan].limit;
+  const usagePct = limit === -1 ? 0 : Math.min(100, (sub.ordersThisMonth / limit) * 100);
+
+  return { rules, blockedPhones, blockedAddresses, shop, plan, ordersThisMonth: sub.ordersThisMonth, limit, usagePct };
 };
 
 // ─── Action ───────────────────────────────────────────────────────────────────
@@ -117,6 +124,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         shopDomain: shop,
         autoCancel: form.get("autoCancel") === "true",
         autoCancelThreshold: clamp(Number(form.get("autoCancelThreshold")) || 75, 1, 100),
+        highValueThreshold: Math.max(0, Number(form.get("highValueThreshold")) || 5000),
         // toggles
         newCustomer: form.get(toggleKey("new_customer")) === "true",
         highRtoPincode: form.get(toggleKey("high_rto_pincode")) === "true",
@@ -230,24 +238,60 @@ function WeightBadge({ weight, enabled }: { weight: number; enabled: boolean }) 
 
 function RemoveBtn({ id }: { id: string }) {
   const f = useFetcher();
+  const [confirming, setConfirming] = useState(false);
+
+  if (confirming) {
+    return (
+      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        <span style={{ fontSize: 12, color: "#d72c0d", fontWeight: 600, whiteSpace: "nowrap" }}>
+          Remove?
+        </span>
+        <f.Form method="POST" style={{ display: "inline" }}>
+          <input type="hidden" name="intent" value="remove-entry" />
+          <input type="hidden" name="id" value={id} />
+          <button
+            type="submit"
+            style={{
+              padding: "3px 12px", borderRadius: 6, border: "none",
+              background: "#d72c0d", color: "#fff", fontSize: 12,
+              cursor: "pointer", fontWeight: 700,
+            }}
+          >
+            Yes
+          </button>
+        </f.Form>
+        <button
+          type="button"
+          onClick={() => setConfirming(false)}
+          style={{
+            padding: "3px 10px", borderRadius: 6, border: "1px solid #c9cccf",
+            background: "transparent", color: "#3d4147", fontSize: 12, cursor: "pointer",
+          }}
+        >
+          No
+        </button>
+      </div>
+    );
+  }
+
   return (
-    <f.Form method="POST">
-      <input type="hidden" name="intent" value="remove-entry" />
-      <input type="hidden" name="id" value={id} />
-      <button
-        type="submit"
-        style={{ padding: "3px 10px", borderRadius: 6, border: "1px solid #d72c0d", background: "transparent", color: "#d72c0d", fontSize: 12, cursor: "pointer" }}
-      >
-        Remove
-      </button>
-    </f.Form>
+    <button
+      type="button"
+      onClick={() => setConfirming(true)}
+      style={{
+        padding: "4px 12px", borderRadius: 6, border: "1px solid #d72c0d",
+        background: "transparent", color: "#d72c0d", fontSize: 12, cursor: "pointer",
+      }}
+    >
+      Remove
+    </button>
   );
 }
 
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function SettingsPage() {
-  const { rules, blockedPhones, blockedAddresses } = useLoaderData<typeof loader>();
+  const { rules, blockedPhones, blockedAddresses, plan, ordersThisMonth, limit, usagePct } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const shopify = useAppBridge();
   const saving = fetcher.state !== "idle";
@@ -277,6 +321,7 @@ export default function SettingsPage() {
 
   const [threshold, setThreshold] = useState(rules.autoCancelThreshold ?? 75);
   const [autoCancel, setAutoCancel] = useState(rules.autoCancel ?? false);
+  const [highValueThreshold, setHighValueThreshold] = useState(rules.highValueThreshold ?? 5000);
 
   useEffect(() => {
     if (fetcher.state === "idle" && fetcher.data?.ok && (fetcher.data as { message?: string }).message) {
@@ -292,11 +337,48 @@ export default function SettingsPage() {
   return (
     <s-page heading="COD Shield — Settings">
 
+      {/* ── Upgrade banners (wrapped in s-section so Shopify iframe renders them) ── */}
+      {limit !== -1 && usagePct >= 100 && (
+        <s-section>
+          <div style={{ padding: "14px 18px", borderRadius: 8, background: "#fff0f0", border: "1.5px solid #f5c0b8", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 13, color: "#d72c0d" }}>
+                Order limit reached — COD scoring is paused ({ordersThisMonth}/{limit} used on {plan} plan)
+              </div>
+              <div style={{ fontSize: 12, color: "#6d7175", marginTop: 3 }}>
+                New COD orders are not being scored. Upgrade to resume protection immediately.
+              </div>
+            </div>
+            <a href="/app/billing" style={{ padding: "8px 18px", borderRadius: 6, background: "#d72c0d", color: "#fff", fontWeight: 700, fontSize: 13, textDecoration: "none", whiteSpace: "nowrap", flexShrink: 0 }}>
+              Upgrade Now
+            </a>
+          </div>
+        </s-section>
+      )}
+      {limit !== -1 && usagePct >= 80 && usagePct < 100 && (
+        <s-section>
+          <div style={{ padding: "14px 18px", borderRadius: 8, background: "#fffbf0", border: "1.5px solid #ffd79a", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 13, color: "#7a5900" }}>
+                {Math.round(usagePct)}% of your {limit}-order limit used this month
+              </div>
+              <div style={{ fontSize: 12, color: "#6d7175", marginTop: 3 }}>
+                At 100%, new orders won't be scored until your 30-day cycle resets.
+              </div>
+            </div>
+            <a href="/app/billing" style={{ padding: "8px 18px", borderRadius: 6, background: "#b98900", color: "#fff", fontWeight: 700, fontSize: 13, textDecoration: "none", whiteSpace: "nowrap", flexShrink: 0 }}>
+              Upgrade Now
+            </a>
+          </div>
+        </s-section>
+      )}
+
       {/* ── Signal Configuration ── */}
       <fetcher.Form method="POST">
         <input type="hidden" name="intent" value="save-rules" />
         <input type="hidden" name="autoCancel" value={String(autoCancel)} />
         <input type="hidden" name="autoCancelThreshold" value={String(threshold)} />
+        <input type="hidden" name="highValueThreshold" value={String(highValueThreshold)} />
 
         <s-section heading="Signal Configuration">
           <div style={{ marginBottom: 12 }}>
@@ -370,6 +452,7 @@ export default function SettingsPage() {
         </s-section>
 
         {/* ── Auto-Cancel Threshold ── */}
+        <div style={{ marginTop: 24 }} />
         <s-section heading="Auto-Cancel Threshold">
           <s-paragraph>
             <s-text>
@@ -434,17 +517,52 @@ export default function SettingsPage() {
               </span>
             )}
           </div>
+
+          {/* High-value order protection */}
+          <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 12, padding: "14px 16px", borderRadius: 8, background: "#f6f6f7", border: "1px solid #e4e5e7" }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 700, fontSize: 13, color: "#3d4147" }}>
+                Skip auto-cancel for high-value orders
+              </div>
+              <div style={{ fontSize: 12, color: "#6d7175", marginTop: 2 }}>
+                Orders above ₹{highValueThreshold.toLocaleString("en-IN")} will be flagged but never auto-cancelled — protecting your revenue.
+              </div>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+              <span style={{ fontSize: 13, color: "#6d7175", fontWeight: 600 }}>₹</span>
+              <input
+                type="number"
+                min={0}
+                max={500000}
+                step={500}
+                value={highValueThreshold}
+                onChange={(e) => setHighValueThreshold(Number(e.target.value))}
+                style={{ width: 100, padding: "7px 10px", borderRadius: 6, border: "1px solid #c9cccf", fontSize: 14, outline: "none" }}
+              />
+            </div>
+          </div>
         </s-section>
 
         {/* Save button */}
-        <div style={{ padding: "0 0 24px" }}>
-          <s-button
-            variant="primary"
-            {...(saving ? { loading: true } : {})}
-            onClick={(e: Event) => (e.target as HTMLElement).closest("form")?.requestSubmit()}
+        <div style={{ padding: "20px 0 24px" }}>
+          <button
+            type="submit"
+            disabled={saving}
+            style={{
+              padding: "11px 28px",
+              borderRadius: 8,
+              background: saving ? "#c9cccf" : "#008060",
+              color: "#fff",
+              fontWeight: 700,
+              fontSize: 14,
+              border: "none",
+              cursor: saving ? "default" : "pointer",
+              transition: "background 0.2s",
+              letterSpacing: "0.2px",
+            }}
           >
-            {saving ? "Saving..." : "Save Settings"}
-          </s-button>
+            {saving ? "Saving…" : "Save Settings"}
+          </button>
         </div>
       </fetcher.Form>
 
@@ -459,7 +577,7 @@ export default function SettingsPage() {
             <div style={labelStyle}>Phone (10 digits)</div>
             <input type="tel" name="phone" placeholder="9876543210" style={inputStyle} required />
           </div>
-          <s-button onClick={(e: Event) => (e.target as HTMLElement).closest("form")?.requestSubmit()}>Add</s-button>
+          <button type="submit" style={addBtnStyle}>Add</button>
         </fetcher.Form>
         <BlocklistTable rows={blockedPhones} col="phone" />
       </s-section>
@@ -473,9 +591,9 @@ export default function SettingsPage() {
           <input type="hidden" name="intent" value="add-address" />
           <div style={{ flex: 1 }}>
             <div style={labelStyle}>Address</div>
-            <input type="text" name="address" placeholder="123 main st|mumbai|mh" style={{ ...inputStyle, width: "100%" }} required />
+            <input type="text" name="address" placeholder="123 main st|mumbai|mh" style={{ ...inputStyle, width: "100%", boxSizing: "border-box" }} required />
           </div>
-          <s-button onClick={(e: Event) => (e.target as HTMLElement).closest("form")?.requestSubmit()}>Add</s-button>
+          <button type="submit" style={addBtnStyle}>Add</button>
         </fetcher.Form>
         <BlocklistTable rows={blockedAddresses} col="address" />
       </s-section>
@@ -557,6 +675,12 @@ const td: React.CSSProperties = {
 const labelStyle: React.CSSProperties = { fontSize: 12, color: "#6d7175", marginBottom: 4 };
 const inputStyle: React.CSSProperties = {
   padding: "8px 12px", borderRadius: 6, border: "1px solid #c9cccf", fontSize: 14, outline: "none",
+};
+const addBtnStyle: React.CSSProperties = {
+  padding: "8px 20px", borderRadius: 6, border: "none",
+  background: "#008060", color: "#fff", fontWeight: 700,
+  fontSize: 14, cursor: "pointer", whiteSpace: "nowrap",
+  height: 38, alignSelf: "flex-end",
 };
 function pill(color: string, bg: string): React.CSSProperties {
   return { padding: "2px 10px", borderRadius: 20, fontSize: 12, fontWeight: 700, background: bg, color, marginRight: 6 };

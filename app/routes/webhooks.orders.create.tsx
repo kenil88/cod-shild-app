@@ -54,6 +54,15 @@ const TAG_MUTATION = `#graphql
   }
 `;
 
+const ORDER_NOTE_MUTATION = `#graphql
+  mutation OrderUpdate($input: OrderInput!) {
+    orderUpdate(input: $input) {
+      order { id }
+      userErrors { field message }
+    }
+  }
+`;
+
 const CANCEL_MUTATION = `#graphql
   mutation CancelOrder(
     $orderId: ID!
@@ -210,11 +219,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         `signals=[${result.triggeredSignals.join(", ")}]`
     );
 
-    // 7. Persist result + update pincode stats in parallel
+    // 7. Persist result + update pincode stats + add Shopify order note — all in parallel
+    const signalList = result.triggeredSignals.join(", ") || "none";
+    const orderNote = `[COD Shield] Score: ${result.score}/100 | Risk: ${result.level.toUpperCase()} | Signals: ${signalList}`;
+
     await Promise.all([
       saveRiskResult(shop, order, result),
       updatePincodeStats(shop, order, false),
       ensureMerchant(shop),
+      admin.graphql(ORDER_NOTE_MUTATION, { variables: { input: { id: gid, note: orderNote } } }),
     ]);
 
     // 8. Auto-tag in Shopify (Starter+ only)
@@ -227,8 +240,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     // 9. Auto-cancel if action = cancel and merchant has it enabled (Growth+ only)
+    // High-value orders are never auto-cancelled regardless of score.
     const isGrowthPlus = billing.plan === "growth" || billing.plan === "scale";
-    if (result.action === "cancel" && rules.autoCancel && isGrowthPlus) {
+    const isHighValue = order.totalPrice >= (rules.highValueThreshold ?? 5000);
+    if (result.action === "cancel" && rules.autoCancel && isGrowthPlus && !isHighValue) {
       const cancelRes = await admin.graphql(CANCEL_MUTATION, {
         variables: {
           orderId: gid,

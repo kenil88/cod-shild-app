@@ -3,7 +3,7 @@ import type {
   HeadersFunction,
   LoaderFunctionArgs,
 } from "react-router";
-import { useLoaderData, useFetcher, useRevalidator } from "react-router";
+import { redirect, useLoaderData, useFetcher, useRevalidator } from "react-router";
 import { useEffect, useRef, useState } from "react";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
@@ -19,7 +19,8 @@ import {
   ensureMerchant,
 } from "../lib/db.server";
 import { scoreOrder, type OrderInput, type SignalKey, levelColor } from "../lib/riskEngine";
-import { incrementOrderCount } from "../lib/billing.server";
+import { incrementOrderCount, getOrCreateSubscription } from "../lib/billing.server";
+import { PLANS, type PlanKey } from "../lib/plans";
 import prisma from "../db.server";
 
 // ─── GraphQL ──────────────────────────────────────────────────────────────────
@@ -85,7 +86,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
 
-  const [stats, orders] = await Promise.all([
+  const [stats, orders, sub, merchant] = await Promise.all([
     getDashboardStats(shop),
     prisma.codOrder.findMany({
       where: { shopDomain: shop },
@@ -105,9 +106,20 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         createdAt: true,
       },
     }),
+    getOrCreateSubscription(shop),
+    prisma.merchant.findUnique({ where: { shopDomain: shop } }),
   ]);
 
-  return { stats, orders, shop };
+  // Fresh install with no orders → send to onboarding wizard
+  if (!merchant || (!merchant.onboardingCompleted && stats.totalOrders === 0)) {
+    throw redirect("/app/onboarding");
+  }
+
+  const plan = (sub.plan in PLANS ? sub.plan : "free") as PlanKey;
+  const limit = PLANS[plan].limit;
+  const usagePct = limit === -1 ? 0 : Math.min(100, (sub.ordersThisMonth / limit) * 100);
+
+  return { stats, orders, shop, plan, ordersThisMonth: sub.ordersThisMonth, limit, usagePct };
 };
 
 // ─── Action (Scan Recent Orders) ──────────────────────────────────────────────
@@ -263,22 +275,58 @@ function SignalChips({ signals }: { signals: unknown }) {
 function MarkRTOButton({ orderId, rtoConfirmed }: { orderId: string; rtoConfirmed: boolean }) {
   const fetcher = useFetcher();
   const busy = fetcher.state !== "idle";
+  const [confirming, setConfirming] = useState(false);
 
   if (rtoConfirmed) {
     return <span style={{ fontSize: 12, fontWeight: 700, color: "#d72c0d" }}>RTO Confirmed</span>;
   }
 
+  if (confirming) {
+    return (
+      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        <span style={{ fontSize: 12, color: "#d72c0d", fontWeight: 600, whiteSpace: "nowrap" }}>
+          Mark RTO?
+        </span>
+        <fetcher.Form method="POST" action="/app/mark-rto" style={{ display: "inline" }}>
+          <input type="hidden" name="codOrderId" value={orderId} />
+          <button
+            type="submit"
+            disabled={busy}
+            style={{
+              padding: "3px 12px", borderRadius: 6, border: "none",
+              background: "#d72c0d", color: "#fff", fontSize: 12,
+              fontWeight: 700, cursor: busy ? "default" : "pointer",
+            }}
+          >
+            {busy ? "…" : "Yes"}
+          </button>
+        </fetcher.Form>
+        <button
+          type="button"
+          onClick={() => setConfirming(false)}
+          style={{
+            padding: "3px 10px", borderRadius: 6, border: "1px solid #c9cccf",
+            background: "transparent", color: "#3d4147", fontSize: 12, cursor: "pointer",
+          }}
+        >
+          No
+        </button>
+      </div>
+    );
+  }
+
   return (
-    <fetcher.Form method="POST" action="/app/mark-rto">
-      <input type="hidden" name="codOrderId" value={orderId} />
-      <button
-        type="submit"
-        disabled={busy}
-        style={{ padding: "4px 10px", borderRadius: 6, border: "1px solid #d72c0d", background: "transparent", color: "#d72c0d", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
-      >
-        {busy ? "..." : "Mark RTO"}
-      </button>
-    </fetcher.Form>
+    <button
+      type="button"
+      onClick={() => setConfirming(true)}
+      style={{
+        padding: "4px 10px", borderRadius: 6, border: "1px solid #d72c0d",
+        background: "transparent", color: "#d72c0d", fontSize: 12,
+        fontWeight: 600, cursor: "pointer",
+      }}
+    >
+      Mark RTO
+    </button>
   );
 }
 
@@ -296,7 +344,7 @@ function rowBg(level: string, rtoConfirmed: boolean) {
 const POLL_INTERVAL_MS = 30_000;
 
 export default function Dashboard() {
-  const { stats, orders } = useLoaderData<typeof loader>();
+  const { stats, orders, plan, ordersThisMonth, limit, usagePct } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const revalidator = useRevalidator();
   const shopify = useAppBridge();
@@ -331,6 +379,19 @@ export default function Dashboard() {
   return (
     <s-page heading="COD Shield — Risk Dashboard">
       <style>{PULSE_STYLE}</style>
+
+      {/* ── Upgrade banners (must be inside s-section to render in Shopify iframe) ── */}
+      {limit !== -1 && usagePct >= 100 && (
+        <s-section>
+          <UsageBanner type="hard" ordersThisMonth={ordersThisMonth} limit={limit} plan={plan} />
+        </s-section>
+      )}
+      {limit !== -1 && usagePct >= 80 && usagePct < 100 && (
+        <s-section>
+          <UsageBanner type="soft" usagePct={Math.round(usagePct)} ordersThisMonth={ordersThisMonth} limit={limit} plan={plan} />
+        </s-section>
+      )}
+
       {/* Live indicator */}
       <div slot="primary-action" style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <span style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#1a7a4a" }}>
@@ -368,6 +429,12 @@ export default function Dashboard() {
             sub="from blocked orders"
             color="#1a7a4a"
             bg="#f4fff8"
+          />
+          <UsageCard
+            plan={plan}
+            ordersThisMonth={ordersThisMonth}
+            limit={limit}
+            usagePct={usagePct}
           />
         </div>
       </s-section>
@@ -445,6 +512,62 @@ export default function Dashboard() {
 
 // ─── Helper components ────────────────────────────────────────────────────────
 
+function UsageBanner({
+  type, usagePct, ordersThisMonth, limit, plan,
+}: {
+  type: "soft" | "hard";
+  usagePct?: number;
+  ordersThisMonth: number;
+  limit: number;
+  plan: string;
+}) {
+  const isHard = type === "hard";
+  return (
+    <div
+      style={{
+        margin: "0 0 16px",
+        padding: "14px 18px",
+        borderRadius: 8,
+        background: isHard ? "#fff0f0" : "#fffbf0",
+        border: `1.5px solid ${isHard ? "#f5c0b8" : "#ffd79a"}`,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 16,
+      }}
+    >
+      <div>
+        <div style={{ fontWeight: 700, fontSize: 13, color: isHard ? "#d72c0d" : "#7a5900" }}>
+          {isHard
+            ? `Order limit reached — scoring paused (${ordersThisMonth}/${limit} used on ${plan} plan)`
+            : `${usagePct}% of your ${limit}-order limit used this month`}
+        </div>
+        <div style={{ fontSize: 12, color: "#6d7175", marginTop: 3 }}>
+          {isHard
+            ? "New COD orders are not being scored. Upgrade or wait for the 30-day cycle to reset."
+            : "At 100%, new orders won't be scored until your cycle resets. Upgrade now to avoid gaps."}
+        </div>
+      </div>
+      <a
+        href="/app/billing"
+        style={{
+          padding: "8px 18px",
+          borderRadius: 6,
+          background: isHard ? "#d72c0d" : "#b98900",
+          color: "#fff",
+          fontWeight: 700,
+          fontSize: 13,
+          textDecoration: "none",
+          whiteSpace: "nowrap",
+          flexShrink: 0,
+        }}
+      >
+        Upgrade Now
+      </a>
+    </div>
+  );
+}
+
 function StatCard({
   label, value, sub, color, bg,
 }: {
@@ -455,6 +578,43 @@ function StatCard({
       <div style={{ fontSize: 12, color: "#6d7175", marginBottom: 4, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>{label}</div>
       <div style={{ fontSize: 30, fontWeight: 800, color, lineHeight: 1.1 }}>{value}</div>
       <div style={{ fontSize: 11, color: "#8c9196", marginTop: 4 }}>{sub}</div>
+    </div>
+  );
+}
+
+function UsageCard({ plan, ordersThisMonth, limit, usagePct }: {
+  plan: string; ordersThisMonth: number; limit: number; usagePct: number;
+}) {
+  const isUnlimited = limit === -1;
+  const barColor = usagePct >= 100 ? "#d72c0d" : usagePct >= 80 ? "#b98900" : "#008060";
+  const bg = usagePct >= 100 ? "#fff8f8" : usagePct >= 80 ? "#fffbf0" : "#f6f6f7";
+  const borderColor = usagePct >= 100 ? "#f5c0b8" : usagePct >= 80 ? "#ffd79a" : "#e4e5e7";
+
+  return (
+    <div style={{ flex: 1, minWidth: 160, padding: "18px 20px", borderRadius: 10, background: bg, border: `1px solid ${borderColor}` }}>
+      <div style={{ fontSize: 12, color: "#6d7175", marginBottom: 4, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>
+        Plan Usage
+      </div>
+      <div style={{ fontSize: 20, fontWeight: 800, color: barColor, lineHeight: 1.2 }}>
+        {ordersThisMonth.toLocaleString()}
+        <span style={{ fontSize: 13, fontWeight: 500, color: "#6d7175" }}>
+          {" "}/ {isUnlimited ? "∞" : limit.toLocaleString()}
+        </span>
+      </div>
+      <div style={{ margin: "8px 0 4px", height: 6, borderRadius: 3, background: "#e4e5e7", overflow: "hidden" }}>
+        <div style={{ width: `${isUnlimited ? 0 : Math.min(100, usagePct)}%`, height: "100%", background: barColor, borderRadius: 3, transition: "width 0.4s" }} />
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ fontSize: 11, color: "#8c9196" }}>
+          {plan.charAt(0).toUpperCase() + plan.slice(1)} plan
+          {!isUnlimited && ` · ${Math.round(usagePct)}% used`}
+        </div>
+        {!isUnlimited && usagePct >= 80 && (
+          <a href="/app/billing" style={{ fontSize: 11, fontWeight: 700, color: barColor, textDecoration: "none" }}>
+            Upgrade ↗
+          </a>
+        )}
+      </div>
     </div>
   );
 }

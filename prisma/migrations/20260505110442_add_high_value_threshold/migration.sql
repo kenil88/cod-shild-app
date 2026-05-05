@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "rules" ADD COLUMN     "highValueThreshold" DOUBLE PRECISION NOT NULL DEFAULT 5000;
