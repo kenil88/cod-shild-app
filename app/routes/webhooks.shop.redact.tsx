@@ -22,6 +22,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       prisma.session.deleteMany({ where: { shop } }),
     ]);
 
+    await prisma.$executeRaw`DELETE FROM "webhook_jobs" WHERE "shopDomain" = ${shop}`;
+
     console.log(`[COD Shield] Erased all data for shop=${shop}`);
   } catch (err) {
     console.error("[COD Shield] shop/redact error:", err);

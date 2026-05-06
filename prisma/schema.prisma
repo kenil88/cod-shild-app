@@ -189,3 +189,20 @@ model Subscription {
 
   @@map("subscriptions")
 }
+
+model WebhookJob {
+  id          String   @id @default(uuid())
+  topic       String
+  shopDomain  String
+  payload     Json
+  status      String   @default("queued") // queued | processing | completed | failed
+  attempts    Int      @default(0)
+  lastError   String?
+  lockedAt    DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([status, createdAt])
+  @@index([shopDomain, createdAt])
+  @@map("webhook_jobs")
+}
