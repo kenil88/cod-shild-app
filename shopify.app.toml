@@ -30,15 +30,15 @@ api_version = "2026-07"
 
   [[webhooks.subscriptions]]
   uri = "/webhooks/customers/data_request"
-  topics = [ "customers/data_request" ]
+  compliance_topics = [ "customers/data_request" ]
 
   [[webhooks.subscriptions]]
   uri = "/webhooks/customers/redact"
-  topics = [ "customers/redact" ]
+  compliance_topics = [ "customers/redact" ]
 
   [[webhooks.subscriptions]]
   uri = "/webhooks/shop/redact"
-  topics = [ "shop/redact" ]
+  compliance_topics = [ "shop/redact" ]
 
 
 [access_scopes]
@@ -46,4 +46,3 @@ scopes = "read_orders,write_orders,read_customers"
 
 [auth]
 redirect_urls = [ "https://example.com/api/auth" ]
-

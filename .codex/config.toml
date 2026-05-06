@@ -1,0 +1,6 @@
+[mcp_servers.shopify-dev-mcp]
+args = [
+    "-y",
+    "@shopify/dev-mcp@latest",
+]
+command = "npx"
