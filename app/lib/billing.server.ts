@@ -3,6 +3,8 @@ import { PLANS, type PlanKey } from "./plans";
 
 export { PLANS, type PlanKey };
 
+export type SubscriptionState = Awaited<ReturnType<typeof getSubscription>>;
+
 // ─── DB helpers ───────────────────────────────────────────────────────────────
 
 async function resetCycleIfStale(shopDomain: string): Promise<void> {
@@ -21,9 +23,19 @@ export async function getOrCreateSubscription(shopDomain: string) {
   await resetCycleIfStale(shopDomain);
   return prisma.subscription.upsert({
     where: { shopDomain },
-    create: { shopDomain, plan: "free", status: "active" },
+    create: { shopDomain, plan: "free", status: "pending" },
     update: {},
   });
+}
+
+export async function getSubscription(shopDomain: string) {
+  await resetCycleIfStale(shopDomain);
+  return prisma.subscription.findUnique({ where: { shopDomain } });
+}
+
+export function isActiveSubscription(sub: SubscriptionState): sub is NonNullable<SubscriptionState> {
+  if (!sub || sub.status !== "active" || !(sub.plan in PLANS)) return false;
+  return sub.plan === "free" || Boolean(sub.shopifySubscriptionId);
 }
 
 /**
@@ -41,9 +53,13 @@ export async function incrementOrderCount(shopDomain: string): Promise<{
 
   const sub = await prisma.subscription.upsert({
     where: { shopDomain },
-    create: { shopDomain, plan: "free", status: "active", ordersThisMonth: 0 },
+    create: { shopDomain, plan: "free", status: "pending", ordersThisMonth: 0 },
     update: {},
   });
+
+  if (sub.status !== "active" || !(sub.plan in PLANS) || (sub.plan !== "free" && !sub.shopifySubscriptionId)) {
+    return { allowed: false, plan: "free", ordersThisMonth: sub.ordersThisMonth, limit: PLANS.free.limit };
+  }
 
   const plan = (sub.plan in PLANS ? sub.plan : "free") as PlanKey;
   const limit = PLANS[plan].limit;

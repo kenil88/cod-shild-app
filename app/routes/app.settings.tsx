@@ -3,13 +3,13 @@ import type {
   HeadersFunction,
   LoaderFunctionArgs,
 } from "react-router";
-import { useLoaderData, useFetcher } from "react-router";
+import { redirect, useLoaderData, useFetcher } from "react-router";
 import { useEffect, useState } from "react";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getMerchantRules } from "../lib/db.server";
-import { getOrCreateSubscription } from "../lib/billing.server";
+import { getSubscription, isActiveSubscription } from "../lib/billing.server";
 import { PLANS, type PlanKey } from "../lib/plans";
 import prisma from "../db.server";
 import type { SignalKey } from "../lib/riskEngine";
@@ -86,8 +86,13 @@ const SIGNALS: {
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
+  const sub = await getSubscription(shop);
 
-  const [rules, blockedPhones, blockedAddresses, sub] = await Promise.all([
+  if (!isActiveSubscription(sub)) {
+    throw redirect("/app/billing");
+  }
+
+  const [rules, blockedPhones, blockedAddresses] = await Promise.all([
     getMerchantRules(shop),
     prisma.address.findMany({
       where: { NOT: { phone: "" } },
@@ -97,7 +102,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       where: { phone: "", NOT: { address: "" } },
       orderBy: { createdAt: "desc" },
     }),
-    getOrCreateSubscription(shop),
   ]);
 
   const plan = (sub.plan in PLANS ? sub.plan : "free") as PlanKey;
@@ -114,15 +118,28 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const shop = session.shop;
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "");
+  const sub = await getSubscription(shop);
+
+  if (!isActiveSubscription(sub)) {
+    throw redirect("/app/billing");
+  }
+
+  const plan = (sub.plan in PLANS ? sub.plan : "free") as PlanKey;
+  const canAutoCancel = plan === "growth" || plan === "scale";
+  const canCustomizeWeights = plan === "scale";
 
   switch (intent) {
     case "save-rules": {
       const weightKey = (k: SignalKey) => `${k}Weight`;
       const toggleKey = (k: SignalKey) => `${k}Toggle`;
+      const weightValue = (k: SignalKey, fallback: number) =>
+        canCustomizeWeights
+          ? clamp(Number(form.get(weightKey(k))) || fallback, 1, 100)
+          : fallback;
 
       const data = {
         shopDomain: shop,
-        autoCancel: form.get("autoCancel") === "true",
+        autoCancel: canAutoCancel && form.get("autoCancel") === "true",
         autoCancelThreshold: clamp(Number(form.get("autoCancelThreshold")) || 75, 1, 100),
         highValueThreshold: Math.max(0, Number(form.get("highValueThreshold")) || 5000),
         // toggles
@@ -135,14 +152,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         multipleAddresses: form.get(toggleKey("multiple_addresses")) === "true",
         orderVelocity: form.get(toggleKey("order_velocity")) === "true",
         // weights
-        newCustomerWeight: clamp(Number(form.get(weightKey("new_customer"))) || 12, 1, 100),
-        highRtoPincodeWeight: clamp(Number(form.get(weightKey("high_rto_pincode"))) || 20, 1, 100),
-        unusualQuantityWeight: clamp(Number(form.get(weightKey("unusual_quantity"))) || 8, 1, 100),
-        nightOrderWeight: clamp(Number(form.get(weightKey("night_order"))) || 3, 1, 100),
-        incompleteAddressWeight: clamp(Number(form.get(weightKey("incomplete_address"))) || 4, 1, 100),
-        pastRtoHistoryWeight: clamp(Number(form.get(weightKey("past_rto_history"))) || 25, 1, 100),
-        multipleAddressesWeight: clamp(Number(form.get(weightKey("multiple_addresses"))) || 10, 1, 100),
-        orderVelocityWeight: clamp(Number(form.get(weightKey("order_velocity"))) || 18, 1, 100),
+        newCustomerWeight: weightValue("new_customer", 12),
+        highRtoPincodeWeight: weightValue("high_rto_pincode", 20),
+        unusualQuantityWeight: weightValue("unusual_quantity", 8),
+        nightOrderWeight: weightValue("night_order", 3),
+        incompleteAddressWeight: weightValue("incomplete_address", 4),
+        pastRtoHistoryWeight: weightValue("past_rto_history", 25),
+        multipleAddressesWeight: weightValue("multiple_addresses", 10),
+        orderVelocityWeight: weightValue("order_velocity", 18),
       };
 
       await prisma.rule.upsert({
@@ -295,6 +312,8 @@ export default function SettingsPage() {
   const fetcher = useFetcher<typeof action>();
   const shopify = useAppBridge();
   const saving = fetcher.state !== "idle";
+  const canAutoCancel = plan === "growth" || plan === "scale";
+  const canCustomizeWeights = plan === "scale";
 
   // Local state for controlled form fields
   const [toggles, setToggles] = useState<Record<SignalKey, boolean>>({
@@ -376,7 +395,7 @@ export default function SettingsPage() {
       {/* ── Signal Configuration ── */}
       <fetcher.Form method="POST">
         <input type="hidden" name="intent" value="save-rules" />
-        <input type="hidden" name="autoCancel" value={String(autoCancel)} />
+        <input type="hidden" name="autoCancel" value={String(canAutoCancel && autoCancel)} />
         <input type="hidden" name="autoCancelThreshold" value={String(threshold)} />
         <input type="hidden" name="highValueThreshold" value={String(highValueThreshold)} />
 
@@ -433,7 +452,7 @@ export default function SettingsPage() {
                           min={1}
                           max={50}
                           value={weights[sig.key] ?? sig.defaultWeight}
-                          disabled={!enabled}
+                          disabled={!enabled || !canCustomizeWeights}
                           onChange={(e) =>
                             setWeights((p) => ({ ...p, [sig.key]: Number(e.target.value) }))
                           }
@@ -499,10 +518,10 @@ export default function SettingsPage() {
           </div>
 
           {/* Auto-cancel toggle */}
-          <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 16, padding: "14px 16px", borderRadius: 8, background: autoCancel ? "#fff8f8" : "#f6f6f7", border: `1px solid ${autoCancel ? "#f5c0b8" : "#e4e5e7"}` }}>
-            <Toggle name="_autoCancelIgnored" checked={autoCancel} onChange={setAutoCancel} />
+          <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 16, padding: "14px 16px", borderRadius: 8, background: canAutoCancel && autoCancel ? "#fff8f8" : "#f6f6f7", border: `1px solid ${canAutoCancel && autoCancel ? "#f5c0b8" : "#e4e5e7"}` }}>
+            <Toggle name="_autoCancelIgnored" checked={canAutoCancel && autoCancel} onChange={(v) => canAutoCancel && setAutoCancel(v)} />
             <div>
-              <div style={{ fontWeight: 700, fontSize: 13, color: autoCancel ? "#d72c0d" : "#3d4147" }}>
+              <div style={{ fontWeight: 700, fontSize: 13, color: canAutoCancel && autoCancel ? "#d72c0d" : "#3d4147" }}>
                 Auto-cancel high-risk COD orders
               </div>
               <div style={{ fontSize: 12, color: "#6d7175" }}>
@@ -511,7 +530,7 @@ export default function SettingsPage() {
                   : "Orders will be tagged and flagged but not cancelled automatically."}
               </div>
             </div>
-            {autoCancel && (
+            {canAutoCancel && autoCancel && (
               <span style={{ marginLeft: "auto", padding: "2px 10px", borderRadius: 20, background: "#ffd2cc", color: "#6d1a13", fontSize: 12, fontWeight: 700 }}>
                 ACTIVE
               </span>

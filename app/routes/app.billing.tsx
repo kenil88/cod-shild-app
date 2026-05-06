@@ -4,7 +4,7 @@ import { useEffect } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { PLANS, type PlanKey } from "../lib/plans";
-import { getOrCreateSubscription, activatePlan } from "../lib/billing.server";
+import { activatePlan, getSubscription, isActiveSubscription } from "../lib/billing.server";
 
 // ─── GraphQL ──────────────────────────────────────────────────────────────────
 
@@ -70,16 +70,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     throw redirect("/app/billing");
   }
 
-  const sub = await getOrCreateSubscription(shop);
-  const plan = (sub.plan in PLANS ? sub.plan : "free") as PlanKey;
+  const sub = await getSubscription(shop);
+  const hasActiveSubscription = isActiveSubscription(sub);
+  const plan = sub && sub.plan in PLANS ? (sub.plan as PlanKey) : "free";
   const limit = PLANS[plan].limit;
   const usagePct =
-    limit === -1 ? 0 : Math.min(100, (sub.ordersThisMonth / limit) * 100);
+    limit === -1 || !sub ? 0 : Math.min(100, (sub.ordersThisMonth / limit) * 100);
 
   return {
     plan,
-    status: sub.status,
-    ordersThisMonth: sub.ordersThisMonth,
+    status: sub?.status ?? "none",
+    hasActiveSubscription,
+    ordersThisMonth: sub?.ordersThisMonth ?? 0,
     limit,
     usagePct,
   };
@@ -170,7 +172,7 @@ const FEATURES: Record<PlanKey, string[]> = {
 // ─── Billing page ─────────────────────────────────────────────────────────────
 
 export default function BillingPage() {
-  const { plan: currentPlan, ordersThisMonth, limit, usagePct } =
+  const { plan: currentPlan, status, hasActiveSubscription, ordersThisMonth, limit, usagePct } =
     useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const isLoading = fetcher.state !== "idle";
@@ -190,6 +192,18 @@ export default function BillingPage() {
       {/* ── Usage bar ── */}
       <s-section heading="This Month's Usage">
         <div style={{ maxWidth: 500 }}>
+          {!hasActiveSubscription && (
+            <p
+              style={{
+                margin: "0 0 12px",
+                fontSize: 13,
+                color: "#7a5900",
+                fontWeight: 700,
+              }}
+            >
+              Choose Free or approve a paid Shopify subscription to continue. Status: {status}.
+            </p>
+          )}
           <div
             style={{
               display: "flex",
@@ -199,7 +213,7 @@ export default function BillingPage() {
             }}
           >
             <span style={{ fontWeight: 700 }}>
-              {PLANS[currentPlan].name} Plan
+              {hasActiveSubscription ? `${PLANS[currentPlan].name} Plan` : "No active plan"}
             </span>
             <span style={{ color: "#6d7175" }}>
               {ordersThisMonth.toLocaleString()} /{" "}
@@ -229,7 +243,7 @@ export default function BillingPage() {
               }}
             />
           </div>
-          {limit !== -1 && usagePct >= 80 && (
+          {hasActiveSubscription && limit !== -1 && usagePct >= 80 && (
             <p
               style={{
                 marginTop: 8,
@@ -242,7 +256,7 @@ export default function BillingPage() {
               Upgrade to avoid missing COD orders.
             </p>
           )}
-          {limit !== -1 && usagePct >= 100 && (
+          {hasActiveSubscription && limit !== -1 && usagePct >= 100 && (
             <p
               style={{
                 marginTop: 4,
@@ -288,7 +302,7 @@ export default function BillingPage() {
         >
           {(Object.keys(PLANS) as PlanKey[]).map((key) => {
             const p = PLANS[key];
-            const isCurrent = key === currentPlan;
+            const isCurrent = hasActiveSubscription && key === currentPlan;
             const isPopular = key === "growth";
 
             return (
@@ -438,7 +452,9 @@ export default function BillingPage() {
                         {isCurrent
                           ? "Current Plan"
                           : key === "free"
-                          ? "Downgrade to Free"
+                          ? hasActiveSubscription
+                            ? "Downgrade to Free"
+                            : "Start Free"
                           : isThisLoading
                           ? "Redirecting to Shopify..."
                           : `Upgrade to ${p.name}`}

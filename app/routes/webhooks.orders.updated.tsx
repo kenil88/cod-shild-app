@@ -2,7 +2,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { updateCustomerHistory, updatePincodeStats } from "../lib/db.server";
-import { getOrCreateSubscription } from "../lib/billing.server";
+import { getOrCreateSubscription, isActiveSubscription } from "../lib/billing.server";
 import type { OrderInput } from "../lib/riskEngine";
 
 // ─── RTO detection ────────────────────────────────────────────────────────────
@@ -112,7 +112,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   try {
     // Auto RTO detection is a Starter+ feature
     const sub = await getOrCreateSubscription(shop);
-    if (sub.plan === "free") {
+    if (!isActiveSubscription(sub) || sub.plan === "free") {
       return new Response(null, { status: 200 });
     }
 
