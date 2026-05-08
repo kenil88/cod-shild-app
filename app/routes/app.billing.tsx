@@ -5,6 +5,8 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { PLANS, type PlanKey } from "../lib/plans";
 import { activatePlan, getSubscription, isActiveSubscription } from "../lib/billing.server";
+import { sendPlanUpgradeEmail } from "../lib/email.server";
+import prisma from "../db.server";
 
 // ─── GraphQL ──────────────────────────────────────────────────────────────────
 
@@ -62,6 +64,22 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         const planKey = node.name.toLowerCase() as PlanKey;
         if (planKey in PLANS) {
           await activatePlan(shop, planKey, chargeId);
+
+          // Send upgrade confirmation email (best-effort)
+          const merchant = await prisma.merchant.findUnique({
+            where: { shopDomain: shop },
+            select: { email: true, shopName: true },
+          });
+          if (merchant?.email) {
+            const parts = (merchant.shopName ?? "").split(" ");
+            sendPlanUpgradeEmail({
+              to: merchant.email,
+              firstName: parts[0] ?? "",
+              lastName: parts.slice(1).join(" "),
+              plan: planKey,
+              price: PLANS[planKey].price,
+            }).catch((err) => console.error("[COD King] Upgrade email failed:", err));
+          }
         }
       }
     } catch (e) {

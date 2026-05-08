@@ -18,6 +18,21 @@ export default function App() {
         <Outlet />
         <ScrollRestoration />
         <Scripts />
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              window.$crisp = [];
+              window.CRISP_WEBSITE_ID = "ff03bb91-3897-4f27-b66f-a3dafceeba4e";
+              (function() {
+                var d = document;
+                var s = d.createElement("script");
+                s.src = "https://client.crisp.chat/l.js";
+                s.async = 1;
+                d.getElementsByTagName("head")[0].appendChild(s);
+              })();
+            `,
+          }}
+        />
       </body>
     </html>
   );

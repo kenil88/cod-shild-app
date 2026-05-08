@@ -6,6 +6,7 @@ import { authenticate } from "../shopify.server";
 import { getOrCreateSubscription } from "../lib/billing.server";
 import { PLANS, type PlanKey } from "../lib/plans";
 import prisma from "../db.server";
+import { sendWelcomeEmail } from "../lib/email.server";
 
 // ─── Loader ───────────────────────────────────────────────────────────────────
 
@@ -26,14 +27,34 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   };
 };
 
+const SHOP_OWNER_QUERY = `#graphql
+  query GetShopOwner {
+    shop {
+      name
+      email
+      contactEmail
+      billingAddress {
+        firstName
+        lastName
+      }
+    }
+  }
+`;
+
 // ─── Action ───────────────────────────────────────────────────────────────────
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const shop = session.shop;
   const form = await request.formData();
 
   const autoCancel = form.get("autoCancel") === "true";
+
+  const existingMerchant = await prisma.merchant.findUnique({
+    where: { shopDomain: shop },
+    select: { onboardingCompleted: true },
+  });
+  const isFirstSetup = !existingMerchant || !existingMerchant.onboardingCompleted;
 
   await Promise.all([
     prisma.rule.upsert({
@@ -47,6 +68,36 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       update: { onboardingCompleted: true },
     }),
   ]);
+
+  if (isFirstSetup) {
+    try {
+      const res = await admin.graphql(SHOP_OWNER_QUERY);
+      const { data } = await res.json();
+      const shopData = data?.shop;
+
+      const email = shopData?.contactEmail || shopData?.email || "";
+      const firstName = shopData?.billingAddress?.firstName || shopData?.name || "";
+      const lastName = shopData?.billingAddress?.lastName || "";
+      const fullName = `${firstName} ${lastName}`.trim();
+
+      // Persist so uninstall webhook (no API access) can use it
+      if (email || fullName) {
+        await prisma.merchant.update({
+          where: { shopDomain: shop },
+          data: {
+            ...(email ? { email } : {}),
+            ...(fullName ? { shopName: fullName } : {}),
+          },
+        });
+      }
+
+      if (email) {
+        await sendWelcomeEmail({ to: email, firstName, lastName });
+      }
+    } catch (err) {
+      console.error("[COD King] Welcome email failed:", err);
+    }
+  }
 
   throw redirect("/app");
 };
