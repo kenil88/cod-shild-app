@@ -1,48 +1,29 @@
-# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
-
-client_id = "1ab6ad2a7b925816f71cf34766518a39"
-name = "cod-shild-app"
-application_url = "https://example.com"
+client_id = "73c885058087a556860842cee3cdf4b8"
+name = "cod-shield"
+application_url = "https://cod-shild-app-production.up.railway.app"
 embedded = true
 
 [build]
 automatically_update_urls_on_dev = true
+dev_store_url = "cod-shield-dev.myshopify.com"
 include_config_on_deploy = true
 
 [webhooks]
 api_version = "2026-07"
 
   [[webhooks.subscriptions]]
-  uri = "/webhooks/app/scopes_update"
-  topics = [ "app/scopes_update" ]
-
-  [[webhooks.subscriptions]]
-  uri = "/webhooks/app/uninstalled"
-  topics = [ "app/uninstalled" ]
-
-  [[webhooks.subscriptions]]
-  uri = "/webhooks/orders/create"
-  topics = [ "orders/create" ]
-
-  [[webhooks.subscriptions]]
-  uri = "/webhooks/orders/updated"
-  topics = [ "orders/updated" ]
-
-  [[webhooks.subscriptions]]
-  uri = "/webhooks/customers/data_request"
-  compliance_topics = [ "customers/data_request" ]
-
-  [[webhooks.subscriptions]]
-  uri = "/webhooks/customers/redact"
-  compliance_topics = [ "customers/redact" ]
-
-  [[webhooks.subscriptions]]
-  uri = "/webhooks/shop/redact"
-  compliance_topics = [ "shop/redact" ]
-
+  uri = "/webhooks"
+  topics = [ "app/uninstalled", "orders/create", "orders/updated" ]
 
 [access_scopes]
-scopes = "read_orders,write_orders,read_customers"
+scopes = "read_fulfillments,write_fulfillments,read_orders,write_orders,customer_read_orders,customer_write_orders"
+optional_scopes = [ ]
+use_legacy_install_flow = false
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [
+  "https://cod-shild-app-production.up.railway.app/auth/callback"
+]
+
+[pos]
+embedded = false
