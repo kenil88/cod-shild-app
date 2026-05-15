@@ -9,7 +9,8 @@
       "Bash(node -e \"const { PrismaClient } = require\\('@prisma/client'\\); const p = new PrismaClient\\(\\); console.log\\(Object.keys\\(p\\).filter\\(k => k === 'subscription'\\)\\)\")",
       "Bash(node -e ' *)",
       "Bash(npx react-router *)",
-      "Bash(Remove-Item -Path \"d:\\\\wamp64\\\\www\\\\cod-shild-app\\\\app\\\\routes\\\\app.additional.tsx\" -Force)"
+      "Bash(Remove-Item -Path \"d:\\\\wamp64\\\\www\\\\cod-shild-app\\\\app\\\\routes\\\\app.additional.tsx\" -Force)",
+      "WebSearch"
     ]
   }
 }
