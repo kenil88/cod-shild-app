@@ -10,7 +10,11 @@
       "Bash(node -e ' *)",
       "Bash(npx react-router *)",
       "Bash(Remove-Item -Path \"d:\\\\wamp64\\\\www\\\\cod-shild-app\\\\app\\\\routes\\\\app.additional.tsx\" -Force)",
-      "WebSearch"
+      "WebSearch",
+      "mcp__shopify-dev-mcp__learn_shopify_api",
+      "WebFetch(domain:shopify.dev)",
+      "Bash(Get-ChildItem -Path \"d:\\\\wamp64\\\\www\\\\cod-shild-app\" -Recurse -Force)",
+      "Bash(Select-Object FullName)"
     ]
   }
 }
