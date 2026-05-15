@@ -44,6 +44,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     data: { isActive: false },
   });
 
+  // Reset subscription so reinstall always goes through billing selection again.
+  // Shopify cancels the AppSubscription on uninstall — our DB must reflect that.
+  await db.subscription.updateMany({
+    where: { shopDomain: shop },
+    data: { status: "cancelled", shopifySubscriptionId: null },
+  });
+
   // Send farewell email (best-effort, never block the 200 response)
   if (email) {
     sendFarewellEmail({ to: email, firstName, lastName }).catch((err) =>

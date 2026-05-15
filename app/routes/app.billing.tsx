@@ -2,6 +2,7 @@ import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "re
 import { redirect, useLoaderData, useFetcher } from "react-router";
 import { useEffect } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
+import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import { PLANS, type PlanKey } from "../lib/plans";
 import { activatePlan, getSubscription, isActiveSubscription } from "../lib/billing.server";
@@ -53,6 +54,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const chargeId = url.searchParams.get("charge_id");
 
   if (chargeId) {
+    let billingDeclined = false;
     try {
       const res = await admin.graphql(VERIFY_SUBSCRIPTION, {
         variables: { id: chargeId },
@@ -81,12 +83,21 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
             }).catch((err) => console.error("[COD King] Upgrade email failed:", err));
           }
         }
+      } else {
+        // Charge was declined or not completed — fall back to free so merchant isn't locked out
+        billingDeclined = true;
+        const existing = await getSubscription(shop);
+        if (!isActiveSubscription(existing)) {
+          await activatePlan(shop, "free", null);
+        }
       }
     } catch (e) {
       console.error("[COD Shield] Subscription verification failed:", e);
     }
-    throw redirect("/app/billing");
+    throw redirect(billingDeclined ? "/app/billing?billing_status=declined" : "/app/billing");
   }
+
+  const billingStatus = url.searchParams.get("billing_status");
 
   const sub = await getSubscription(shop);
   const hasActiveSubscription = isActiveSubscription(sub);
@@ -102,6 +113,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     ordersThisMonth: sub?.ordersThisMonth ?? 0,
     limit,
     usagePct,
+    billingDeclined: billingStatus === "declined",
   };
 };
 
@@ -190,9 +202,10 @@ const FEATURES: Record<PlanKey, string[]> = {
 // ─── Billing page ─────────────────────────────────────────────────────────────
 
 export default function BillingPage() {
-  const { plan: currentPlan, status, hasActiveSubscription, ordersThisMonth, limit, usagePct } =
+  const { plan: currentPlan, status, hasActiveSubscription, ordersThisMonth, limit, usagePct, billingDeclined } =
     useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
+  const shopify = useAppBridge();
   const isLoading = fetcher.state !== "idle";
   const submittedPlan = fetcher.formData?.get("plan") as string | null;
   const error = fetcher.data?.error;
@@ -204,6 +217,13 @@ export default function BillingPage() {
       (window.top ?? window).location.href = url;
     }
   }, [fetcher.data]);
+
+  // Show toast on successful downgrade to free
+  useEffect(() => {
+    if (fetcher.data?.downgraded) {
+      shopify.toast.show("Downgraded to Free plan.");
+    }
+  }, [fetcher.data, shopify]);
 
   return (
     <s-page heading="COD Shield — Billing">
@@ -289,6 +309,26 @@ export default function BillingPage() {
           )}
         </div>
       </s-section>
+
+      {/* ── Declined billing banner ── */}
+      {billingDeclined && (
+        <s-section>
+          <div
+            style={{
+              padding: "12px 16px",
+              background: "#fff8f0",
+              border: "1px solid #ffc58b",
+              borderRadius: 8,
+              color: "#7a4100",
+              fontSize: 13,
+              fontWeight: 600,
+            }}
+          >
+            Your subscription wasn't activated. You've been placed on the Free plan — you can upgrade
+            any time below.
+          </div>
+        </s-section>
+      )}
 
       {/* ── Error banner ── */}
       {error && (
