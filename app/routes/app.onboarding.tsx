@@ -1,5 +1,5 @@
 import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { redirect, useLoaderData, useFetcher } from "react-router";
+import { useLoaderData, useFetcher } from "react-router";
 import { useState } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
@@ -44,7 +44,7 @@ const SHOP_OWNER_QUERY = `#graphql
 // ─── Action ───────────────────────────────────────────────────────────────────
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { admin, session } = await authenticate.admin(request);
+  const { admin, session, redirect } = await authenticate.admin(request);
   const shop = session.shop;
   const form = await request.formData();
 

@@ -3,7 +3,7 @@ import type {
   HeadersFunction,
   LoaderFunctionArgs,
 } from "react-router";
-import { redirect, useLoaderData, useFetcher, useRevalidator } from "react-router";
+import { useLoaderData, useFetcher, useRevalidator } from "react-router";
 import { useEffect, useRef, useState } from "react";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
@@ -83,7 +83,7 @@ function isCOD(names: string[]) {
 // ─── Loader ───────────────────────────────────────────────────────────────────
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, redirect } = await authenticate.admin(request);
   const shop = session.shop;
 
   const [stats, orders, sub, merchant] = await Promise.all([
