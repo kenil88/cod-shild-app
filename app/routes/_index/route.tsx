@@ -5,7 +5,8 @@ import styles from "./styles.module.css";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
-  if (url.searchParams.get("shop")) {
+  // Redirect to /app for any Shopify-embedded request (old admin adds "shop", new admin adds "host")
+  if (url.searchParams.get("shop") || url.searchParams.get("host")) {
     throw redirect(`/app?${url.searchParams.toString()}`);
   }
   return { showForm: Boolean(login) };

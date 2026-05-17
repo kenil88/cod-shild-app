@@ -1,6 +1,6 @@
 client_id = "1ab6ad2a7b925816f71cf34766518a39"
 name = "cod-shield"
-application_url = "https://cod-shild-app-production.up.railway.app"
+application_url = "https://cod-shild-app-production.up.railway.app/app"
 embedded = true
 
 [build]
