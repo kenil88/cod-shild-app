@@ -9,13 +9,16 @@ import { getSubscription, isActiveSubscription } from "../lib/billing.server";
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session, redirect } = await authenticate.admin(request);
   const url = new URL(request.url);
-  const isPricingRoute =
-    url.pathname === "/app/billing" || url.pathname === "/app/pricing";
+  const isSubscriptionFreeRoute =
+    url.pathname === "/app" ||
+    url.pathname === "/app/billing" ||
+    url.pathname === "/app/pricing" ||
+    url.pathname === "/app/onboarding";
 
-  if (!isPricingRoute) {
+  if (!isSubscriptionFreeRoute) {
     const sub = await getSubscription(session.shop);
     if (!isActiveSubscription(sub)) {
-      throw redirect("/app/billing");
+      throw redirect("/app");
     }
   }
 

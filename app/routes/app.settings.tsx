@@ -89,7 +89,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const sub = await getSubscription(shop);
 
   if (!isActiveSubscription(sub)) {
-    throw redirect("/app/billing");
+    throw redirect("/app");
   }
 
   const [rules, blockedPhones, blockedAddresses] = await Promise.all([
@@ -121,7 +121,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const sub = await getSubscription(shop);
 
   if (!isActiveSubscription(sub)) {
-    throw redirect("/app/billing");
+    throw redirect("/app");
   }
 
   const plan = (sub.plan in PLANS ? sub.plan : "free") as PlanKey;
