@@ -21,11 +21,18 @@ async function resetCycleIfStale(shopDomain: string): Promise<void> {
 
 export async function getOrCreateSubscription(shopDomain: string) {
   await resetCycleIfStale(shopDomain);
-  return prisma.subscription.upsert({
-    where: { shopDomain },
-    create: { shopDomain, plan: "free", status: "pending" },
-    update: {},
-  });
+  const existing = await prisma.subscription.findUnique({ where: { shopDomain } });
+  if (!existing) {
+    return prisma.subscription.create({ data: { shopDomain, plan: "free", status: "pending" } });
+  }
+  // Treat cancelled subscriptions as free/pending — happens after uninstall+reinstall.
+  if (existing.status === "cancelled") {
+    return prisma.subscription.update({
+      where: { shopDomain },
+      data: { plan: "free", status: "pending", shopifySubscriptionId: null, ordersThisMonth: 0, cycleStartAt: new Date() },
+    });
+  }
+  return existing;
 }
 
 export async function getSubscription(shopDomain: string) {

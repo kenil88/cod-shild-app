@@ -41,14 +41,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   await db.merchant.updateMany({
     where: { shopDomain: shop },
-    data: { isActive: false },
+    data: { isActive: false, onboardingCompleted: false },
   });
 
   // Reset subscription so reinstall always goes through billing selection again.
   // Shopify cancels the AppSubscription on uninstall — our DB must reflect that.
   await db.subscription.updateMany({
     where: { shopDomain: shop },
-    data: { status: "cancelled", shopifySubscriptionId: null },
+    data: { status: "cancelled", shopifySubscriptionId: null, plan: "free" },
   });
 
   // Send farewell email (best-effort, never block the 200 response)
