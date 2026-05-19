@@ -19,7 +19,7 @@ import {
   ensureMerchant,
 } from "../lib/db.server";
 import { scoreOrder, type OrderInput, type SignalKey, levelColor } from "../lib/riskEngine";
-import { incrementOrderCount, getOrCreateSubscription } from "../lib/billing.server";
+import { incrementOrderCount, getOrCreateSubscription, activatePlan } from "../lib/billing.server";
 import { PLANS, type PlanKey } from "../lib/plans";
 import prisma from "../db.server";
 
@@ -115,108 +115,122 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     throw redirect("/app/onboarding");
   }
 
-  const plan = (sub.plan in PLANS ? sub.plan : "free") as PlanKey;
-  const limit = PLANS[plan].limit;
-  const usagePct = limit === -1 ? 0 : Math.min(100, (sub.ordersThisMonth / limit) * 100);
+  // Auto-heal: free plan subscriptions stuck in "pending" can't scan orders.
+  // Activate them here so merchants who completed onboarding aren't blocked.
+  let activeSub = sub;
+  if (sub.status !== "active") {
+    await activatePlan(shop, "free");
+    activeSub = { ...sub, plan: "free", status: "active", ordersThisMonth: 0 };
+  }
 
-  return { stats, orders, shop, plan, ordersThisMonth: sub.ordersThisMonth, limit, usagePct };
+  const plan = (activeSub.plan in PLANS ? activeSub.plan : "free") as PlanKey;
+  const limit = PLANS[plan].limit;
+  const usagePct = limit === -1 ? 0 : Math.min(100, (activeSub.ordersThisMonth / limit) * 100);
+
+  return { stats, orders, shop, plan, ordersThisMonth: activeSub.ordersThisMonth, limit, usagePct };
 };
 
 // ─── Action (Scan Recent Orders) ──────────────────────────────────────────────
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { admin, session } = await authenticate.admin(request);
-  const shop = session.shop;
+  try {
+    const { admin, session } = await authenticate.admin(request);
+    const shop = session.shop;
 
-  const res = await admin.graphql(RECENT_ORDERS_QUERY);
-  const { data } = await res.json();
+    const res = await admin.graphql(RECENT_ORDERS_QUERY);
+    const { data } = await res.json();
 
-  if (!data?.orders) {
-    return { scanned: 0, skipped: 0, error: "Order access not approved. Enable Protected Customer Data in the Shopify Partner Dashboard." };
+    if (!data?.orders) {
+      return { scanned: 0, skipped: 0, error: "Order access not approved. Enable Protected Customer Data in the Shopify Partner Dashboard." };
+    }
+
+    const rawOrders = (data.orders.edges ?? []).map((e: { node: unknown }) => e.node as Record<string, unknown>);
+    const rules = await getMerchantRules(shop);
+    await ensureMerchant(shop);
+
+    let scanned = 0;
+    let skipped = 0;
+
+    for (const o of rawOrders) {
+      const gatewayNames = (o.paymentGatewayNames as string[]) ?? [];
+      if (!isCOD(gatewayNames)) { skipped++; continue; }
+
+      const orderNum = ((o.name as string) ?? "").replace("#", "");
+      const existing = await prisma.codOrder.findFirst({ where: { shopDomain: shop, orderNumber: orderNum } });
+      if (existing) { skipped++; continue; }
+
+      // Check billing limit before doing any work for this order
+      const billing = await incrementOrderCount(shop);
+      if (!billing.allowed) {
+        skipped++;
+        break; // stop scanning — merchant is at their plan limit
+      }
+
+      const lineItems = ((o.lineItems as { edges: { node: { quantity: number } }[] })?.edges ?? []).map((e) => ({ quantity: e.node.quantity }));
+
+      const order: OrderInput = {
+        shopifyOrderId: o.id as string,
+        orderNumber: orderNum,
+        paymentMethod: gatewayNames.join(", "),
+        totalPrice: parseFloat((o.totalPriceSet as { shopMoney: { amount: string } })?.shopMoney?.amount ?? "0"),
+        lineItems,
+        createdAt: (o.createdAt as string) ?? new Date().toISOString(),
+        ip: (o.clientIp as string) ?? null,
+        customer: o.customer ? {
+          id: String((o.customer as { legacyResourceId: string }).legacyResourceId),
+          phone: (o.customer as { phone?: string | null }).phone ?? null,
+          email: (o.customer as { email?: string | null }).email ?? null,
+          ordersCount: Number((o.customer as { numberOfOrders?: number }).numberOfOrders ?? 0),
+        } : null,
+        shippingAddress: o.shippingAddress ? {
+          address1: (o.shippingAddress as { address1?: string }).address1 ?? null,
+          city: (o.shippingAddress as { city?: string }).city ?? null,
+          zip: (o.shippingAddress as { zip?: string }).zip ?? null,
+          phone: (o.shippingAddress as { phone?: string | null }).phone ?? null,
+        } : null,
+      };
+
+      const phone = order.customer?.phone ?? order.shippingAddress?.phone ?? null;
+      const email = order.customer?.email ?? null;
+      const pincode = order.shippingAddress?.zip ?? null;
+
+      const [customerHistory, pincodeStats, ipStats] = await Promise.all([
+        getCustomerHistory(shop, phone, email),
+        getPincodeStats(shop, pincode),
+        getIpStats(shop, order.ip, 60),
+      ]);
+
+      const result = scoreOrder(order, customerHistory, pincodeStats, ipStats, rules);
+
+      await Promise.all([
+        saveRiskResult(shop, order, result),
+        updatePincodeStats(shop, order, false),
+      ]);
+
+      // Auto-tag (Starter+ only)
+      if (result.level !== "safe" && billing.plan !== "free") {
+        const tag = result.level === "high" ? "cod-high-risk" : "cod-medium-risk";
+        await admin.graphql(TAG_MUTATION, { variables: { id: o.id as string, tags: [tag, "cod-shield"] } });
+      }
+
+      // Auto-cancel (Growth+ only, high-value orders excluded)
+      const isGrowthPlus = billing.plan === "growth" || billing.plan === "scale";
+      const isHighValue = order.totalPrice >= (rules.highValueThreshold ?? 5000);
+      if (result.action === "cancel" && rules.autoCancel && isGrowthPlus && !isHighValue) {
+        await admin.graphql(CANCEL_MUTATION, {
+          variables: { orderId: o.id as string, reason: "FRAUD", notifyCustomer: false, restock: true },
+        });
+      }
+
+      scanned++;
+    }
+
+    return { scanned, skipped, error: null };
+  } catch (err) {
+    console.error("[COD Shield] Scan error:", err);
+    const message = err instanceof Error ? err.message : "Unknown error occurred";
+    return { scanned: 0, skipped: 0, error: `Scan failed: ${message}` };
   }
-
-  const rawOrders = (data.orders.edges ?? []).map((e: { node: unknown }) => e.node as Record<string, unknown>);
-  const rules = await getMerchantRules(shop);
-  await ensureMerchant(shop);
-
-  let scanned = 0;
-  let skipped = 0;
-
-  for (const o of rawOrders) {
-    const gatewayNames = (o.paymentGatewayNames as string[]) ?? [];
-    if (!isCOD(gatewayNames)) { skipped++; continue; }
-
-    const orderNum = ((o.name as string) ?? "").replace("#", "");
-    const existing = await prisma.codOrder.findFirst({ where: { shopDomain: shop, orderNumber: orderNum } });
-    if (existing) { skipped++; continue; }
-
-    const lineItems = ((o.lineItems as { edges: { node: { quantity: number } }[] })?.edges ?? []).map((e) => ({ quantity: e.node.quantity }));
-
-    const order: OrderInput = {
-      shopifyOrderId: o.id as string,
-      orderNumber: orderNum,
-      paymentMethod: gatewayNames.join(", "),
-      totalPrice: parseFloat((o.totalPriceSet as { shopMoney: { amount: string } })?.shopMoney?.amount ?? "0"),
-      lineItems,
-      createdAt: (o.createdAt as string) ?? new Date().toISOString(),
-      ip: (o.clientIp as string) ?? null,
-      customer: o.customer ? {
-        id: String((o.customer as { legacyResourceId: string }).legacyResourceId),
-        phone: (o.customer as { phone?: string | null }).phone ?? null,
-        email: (o.customer as { email?: string | null }).email ?? null,
-        ordersCount: Number((o.customer as { numberOfOrders?: number }).numberOfOrders ?? 0),
-      } : null,
-      shippingAddress: o.shippingAddress ? {
-        address1: (o.shippingAddress as { address1?: string }).address1 ?? null,
-        city: (o.shippingAddress as { city?: string }).city ?? null,
-        zip: (o.shippingAddress as { zip?: string }).zip ?? null,
-        phone: (o.shippingAddress as { phone?: string | null }).phone ?? null,
-      } : null,
-    };
-
-    const phone = order.customer?.phone ?? order.shippingAddress?.phone ?? null;
-    const email = order.customer?.email ?? null;
-    const pincode = order.shippingAddress?.zip ?? null;
-
-    const [customerHistory, pincodeStats, ipStats] = await Promise.all([
-      getCustomerHistory(shop, phone, email),
-      getPincodeStats(shop, pincode),
-      getIpStats(shop, order.ip, 60),
-    ]);
-
-    // Check billing limit before scoring
-    const billing = await incrementOrderCount(shop);
-    if (!billing.allowed) {
-      skipped++;
-      break; // stop scanning — merchant is at their plan limit
-    }
-
-    const result = scoreOrder(order, customerHistory, pincodeStats, ipStats, rules);
-
-    await Promise.all([
-      saveRiskResult(shop, order, result),
-      updatePincodeStats(shop, order, false),
-    ]);
-
-    // Auto-tag (Starter+ only)
-    if (result.level !== "safe" && billing.plan !== "free") {
-      const tag = result.level === "high" ? "cod-high-risk" : "cod-medium-risk";
-      await admin.graphql(TAG_MUTATION, { variables: { id: o.id as string, tags: [tag, "cod-shield"] } });
-    }
-
-    // Auto-cancel (Growth+ only, high-value orders excluded)
-    const isGrowthPlus = billing.plan === "growth" || billing.plan === "scale";
-    const isHighValue = order.totalPrice >= (rules.highValueThreshold ?? 5000);
-    if (result.action === "cancel" && rules.autoCancel && isGrowthPlus && !isHighValue) {
-      await admin.graphql(CANCEL_MUTATION, {
-        variables: { orderId: o.id as string, reason: "FRAUD", notifyCustomer: false, restock: true },
-      });
-    }
-
-    scanned++;
-  }
-
-  return { scanned, skipped, error: null };
 };
 
 // ─── Signal labels ────────────────────────────────────────────────────────────

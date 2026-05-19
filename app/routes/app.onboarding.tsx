@@ -3,7 +3,7 @@ import { useLoaderData, useFetcher } from "react-router";
 import { useState } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
-import { getOrCreateSubscription } from "../lib/billing.server";
+import { getOrCreateSubscription, activatePlan } from "../lib/billing.server";
 import { PLANS, type PlanKey } from "../lib/plans";
 import prisma from "../db.server";
 import { sendWelcomeEmail } from "../lib/email.server";
@@ -97,6 +97,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     } catch (err) {
       console.error("[COD King] Welcome email failed:", err);
     }
+  }
+
+  // Activate free plan if the merchant hasn't paid for a higher plan yet.
+  // Without this, subscription stays "pending" and order scanning is blocked.
+  const sub = await getOrCreateSubscription(shop);
+  if (sub.status !== "active") {
+    await activatePlan(shop, "free");
   }
 
   throw redirect("/app");
