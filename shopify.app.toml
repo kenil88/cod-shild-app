@@ -1,3 +1,5 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
 client_id = "1ab6ad2a7b925816f71cf34766518a39"
 name = "cod-shield"
 application_url = "https://cod-shild-app-production.up.railway.app"
@@ -15,16 +17,16 @@ api_version = "2026-07"
   topics = [ "app/uninstalled" ]
 
   [[webhooks.subscriptions]]
-  uri = "/webhooks/app/scopes_update"
-  topics = [ "app/scopes_update" ]
+  uri = "/webhooks/orders/updated"
+  topics = [ "orders/updated" ]
 
   [[webhooks.subscriptions]]
   uri = "/webhooks/orders/create"
   topics = [ "orders/create" ]
 
   [[webhooks.subscriptions]]
-  uri = "/webhooks/orders/updated"
-  topics = [ "orders/updated" ]
+  uri = "/webhooks/app/scopes_update"
+  topics = [ "app/scopes_update" ]
 
   [[webhooks.subscriptions]]
   uri = "/webhooks/customers/data_request"
@@ -39,7 +41,8 @@ api_version = "2026-07"
   compliance_topics = [ "shop/redact" ]
 
 [access_scopes]
-scopes = "read_fulfillments,write_fulfillments,read_orders,write_orders,customer_read_orders,customer_write_orders"
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "read_customers,read_fulfillments,write_fulfillments,read_orders,write_orders,customer_read_orders,customer_write_orders"
 optional_scopes = [ ]
 use_legacy_install_flow = false
 
