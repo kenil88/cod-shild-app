@@ -135,7 +135,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const plan = form.get("plan") as PlanKey;
 
   if (!plan || !(plan in PLANS)) {
-    return { confirmationUrl: null, error: "Invalid plan selected." };
+    return { confirmationUrl: null, error: "Invalid plan selected.", devActivated: null };
   }
 
   // Cancel any existing Shopify subscription before switching plans
@@ -153,7 +153,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   // Downgrade to free — no Shopify charge needed
   if (plan === "free") {
     await activatePlan(shop, "free", null);
-    return { confirmationUrl: null, error: null, downgraded: true };
+    return { confirmationUrl: null, error: null, downgraded: true, devActivated: null };
   }
 
   // Paid plan: create Shopify recurring subscription
@@ -182,12 +182,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const result = data?.appSubscriptionCreate;
 
   if (result?.userErrors?.length > 0) {
-    return { confirmationUrl: null, error: result.userErrors[0].message };
+    const errMsg = result.userErrors[0].message as string;
+    // In development, Managed Pricing apps can't use the Billing API — activate the plan directly
+    if (
+      process.env.NODE_ENV !== "production" &&
+      errMsg.toLowerCase().includes("managed pricing")
+    ) {
+      await activatePlan(shop, plan, `dev-bypass-${Date.now()}`);
+      return { confirmationUrl: null, error: null, devActivated: plan as string };
+    }
+    return { confirmationUrl: null, error: errMsg };
   }
 
   return {
     confirmationUrl: (result?.confirmationUrl as string) ?? null,
     error: null,
+    devActivated: null,
   };
 };
 
@@ -243,6 +253,15 @@ export default function BillingPage() {
   useEffect(() => {
     if (fetcher.data?.downgraded) {
       shopify.toast.show("Downgraded to Free plan.");
+    }
+  }, [fetcher.data, shopify]);
+
+  // Dev bypass: managed pricing apps can't use Billing API in development
+  useEffect(() => {
+    const activated = fetcher.data?.devActivated;
+    if (activated) {
+      const planName = PLANS[activated as PlanKey]?.name ?? activated;
+      shopify.toast.show(`[Dev] Activated ${planName} plan (Shopify billing bypassed).`);
     }
   }, [fetcher.data, shopify]);
 
