@@ -251,29 +251,55 @@ function buildOrderInput(o: Record<string, unknown>): OrderInput {
 
 async function processOrderCreate(shop: string, payload: Prisma.JsonValue) {
   const rawPayload = asRecord(payload);
-  const gatewayNamesFromPayload = (rawPayload.payment_gateway_names as string[]) ?? [];
-  const singleGateway = (rawPayload.payment_gateway as string) ?? "";
-  const allGatewayIds = [...gatewayNamesFromPayload];
-  if (singleGateway) allGatewayIds.push(singleGateway);
-
-  if (allGatewayIds.length > 0 && !isCOD(allGatewayIds)) {
-    return;
-  }
 
   const gid = rawPayload.admin_graphql_api_id as string | undefined;
   if (!gid) return;
 
-  const { admin } = await unauthenticated.admin(shop);
-  const res = await admin.graphql(ORDER_QUERY, { variables: { id: gid } });
-  const { data } = await res.json();
-  const o = data?.order as Record<string, unknown> | null;
+  // COD detection from webhook payload fields
+  const gatewayNamesFromPayload = (rawPayload.payment_gateway_names as string[]) ?? [];
+  const singleGateway = (rawPayload.payment_gateway as string) ?? "";
+  const allGatewayIds = [...new Set([...gatewayNamesFromPayload, ...(singleGateway ? [singleGateway] : [])])];
 
-  if (!o) return;
+  if (allGatewayIds.length > 0 && !isCOD(allGatewayIds)) return;
 
-  const gatewayNames = (o.paymentGatewayNames as string[]) ?? [];
-  if (!isCOD(gatewayNames)) return;
+  // Build OrderInput directly from the webhook payload — no extra GraphQL call needed.
+  // This makes the core save path independent of the admin API.
+  const lineItemsRaw = (rawPayload.line_items as Array<{ quantity: number }> | null) ?? [];
+  const lineItems = lineItemsRaw.map((item) => ({ quantity: Number(item.quantity ?? 1) }));
 
-  const order = buildOrderInput(o);
+  const customerRaw = rawPayload.customer as Record<string, unknown> | null;
+  const shippingRaw = rawPayload.shipping_address as Record<string, unknown> | null;
+  const paymentMethod = allGatewayIds.join(", ") || singleGateway || "manual";
+
+  // Final COD gate: if paymentMethod is still not COD, skip
+  if (!isCOD([paymentMethod])) return;
+
+  const order: OrderInput = {
+    shopifyOrderId: gid,
+    orderNumber: ((rawPayload.name as string) ?? "").replace("#", ""),
+    paymentMethod,
+    totalPrice: parseFloat((rawPayload.total_price as string) ?? "0"),
+    lineItems: lineItems.length > 0 ? lineItems : [{ quantity: 1 }],
+    createdAt: (rawPayload.created_at as string) ?? new Date().toISOString(),
+    ip: (rawPayload.browser_ip as string) ?? null,
+    customer: customerRaw
+      ? {
+          id: String(customerRaw.id ?? ""),
+          phone: (customerRaw.phone as string | null) ?? null,
+          email: (customerRaw.email as string | null) ?? null,
+          ordersCount: Number(customerRaw.orders_count ?? 0),
+        }
+      : null,
+    shippingAddress: shippingRaw
+      ? {
+          address1: (shippingRaw.address1 as string | null) ?? null,
+          city: (shippingRaw.city as string | null) ?? null,
+          zip: (shippingRaw.zip as string | null) ?? null,
+          phone: (shippingRaw.phone as string | null) ?? null,
+        }
+      : null,
+  };
+
   const existing = await prisma.codOrder.findFirst({
     where: { shopDomain: shop, shopifyOrderId: order.shopifyOrderId },
     select: { id: true },
@@ -296,39 +322,46 @@ async function processOrderCreate(shop: string, payload: Prisma.JsonValue) {
   ]);
 
   const result = scoreOrder(order, customerHistory, pincodeStats, ipStats, rules);
-  const signalList = result.triggeredSignals.join(", ") || "none";
-  const orderNote = `[COD Shield] Score: ${result.score}/100 | Risk: ${result.level.toUpperCase()} | Signals: ${signalList}`;
 
+  // Save to DB first — this must succeed
   await Promise.all([
     saveRiskResult(shop, order, result),
     updatePincodeStats(shop, order, false),
     ensureMerchant(shop),
-    admin.graphql(ORDER_NOTE_MUTATION, { variables: { input: { id: gid, note: orderNote } } }),
   ]);
 
-  if (result.level !== "safe" && billing.plan !== "free") {
-    const tag = result.level === "high" ? "cod-high-risk" : "cod-medium-risk";
-    await admin.graphql(TAG_MUTATION, {
-      variables: { id: gid, tags: [tag, "cod-shield"] },
-    });
-  }
+  // Admin API operations (add note, tag, cancel) are best-effort.
+  // A failure here must NOT prevent the order from being recorded.
+  try {
+    const { admin } = await unauthenticated.admin(shop);
+    const signalList = result.triggeredSignals.join(", ") || "none";
+    const orderNote = `[COD Shield] Score: ${result.score}/100 | Risk: ${result.level.toUpperCase()} | Signals: ${signalList}`;
 
-  const isGrowthPlus = billing.plan === "growth" || billing.plan === "scale";
-  const isHighValue = order.totalPrice >= (rules.highValueThreshold ?? 5000);
-  if (result.action === "cancel" && rules.autoCancel && isGrowthPlus && !isHighValue) {
-    const cancelRes = await admin.graphql(CANCEL_MUTATION, {
-      variables: {
-        orderId: gid,
-        reason: "FRAUD",
-        notifyCustomer: false,
-        restock: true,
-      },
+    await admin.graphql(ORDER_NOTE_MUTATION, {
+      variables: { input: { id: gid, note: orderNote } },
     });
-    const cancelData = await cancelRes.json();
-    const errors = cancelData?.data?.orderCancel?.orderCancelUserErrors ?? [];
-    if (errors.length > 0) {
-      throw new Error(`Cancel errors: ${JSON.stringify(errors)}`);
+
+    if (result.level !== "safe" && billing.plan !== "free") {
+      const tag = result.level === "high" ? "cod-high-risk" : "cod-medium-risk";
+      await admin.graphql(TAG_MUTATION, {
+        variables: { id: gid, tags: [tag, "cod-shield"] },
+      });
     }
+
+    const isGrowthPlus = billing.plan === "growth" || billing.plan === "scale";
+    const isHighValue = order.totalPrice >= (rules.highValueThreshold ?? 5000);
+    if (result.action === "cancel" && rules.autoCancel && isGrowthPlus && !isHighValue) {
+      const cancelRes = await admin.graphql(CANCEL_MUTATION, {
+        variables: { orderId: gid, reason: "FRAUD", notifyCustomer: false, restock: true },
+      });
+      const cancelData = await cancelRes.json();
+      const errors = cancelData?.data?.orderCancel?.orderCancelUserErrors ?? [];
+      if (errors.length > 0) {
+        console.error("[COD Shield] Auto-cancel errors:", errors);
+      }
+    }
+  } catch (adminErr) {
+    console.error("[COD Shield] Admin API ops failed (order saved to DB):", adminErr);
   }
 }
 
