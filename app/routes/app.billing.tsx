@@ -43,6 +43,15 @@ const VERIFY_SUBSCRIPTION = `#graphql
   }
 `;
 
+const CANCEL_SUBSCRIPTION = `#graphql
+  mutation AppSubscriptionCancel($id: ID!) {
+    appSubscriptionCancel(id: $id) {
+      userErrors { field message }
+      appSubscription { id status }
+    }
+  }
+`;
+
 // ─── Loader ───────────────────────────────────────────────────────────────────
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -127,6 +136,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (!plan || !(plan in PLANS)) {
     return { confirmationUrl: null, error: "Invalid plan selected." };
+  }
+
+  // Cancel any existing Shopify subscription before switching plans
+  const existingSub = await getSubscription(shop);
+  if (existingSub?.shopifySubscriptionId) {
+    try {
+      await admin.graphql(CANCEL_SUBSCRIPTION, {
+        variables: { id: existingSub.shopifySubscriptionId },
+      });
+    } catch (e) {
+      console.error("[COD Shield] Failed to cancel existing subscription:", e);
+    }
   }
 
   // Downgrade to free — no Shopify charge needed
