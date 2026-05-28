@@ -1,7 +1,7 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
 client_id = "1ab6ad2a7b925816f71cf34766518a39"
-name = "cod-shield"
+name = "COD Shield ‑ RTO Prevention"
 application_url = "https://cod-shild-app-production.up.railway.app"
 embedded = true
 
