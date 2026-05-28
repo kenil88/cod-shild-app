@@ -83,36 +83,32 @@ function isCOD(names: string[]) {
 
 // ─── Loader ───────────────────────────────────────────────────────────────────
 
+const ORDER_FIELDS_SELECT = {
+  id: true,
+  orderNumber: true,
+  shopifyOrderId: true,
+  riskScore: true,
+  riskLevel: true,
+  action: true,
+  signalsTriggered: true,
+  isBlocked: true,
+  rtoConfirmed: true,
+  orderValue: true,
+  createdAt: true,
+} as const;
+
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session, redirect } = await authenticate.admin(request);
+  const { admin, session, redirect } = await authenticate.admin(request);
   const shop = session.shop;
 
-  const [stats, orders, sub, merchant] = await Promise.all([
+  const [initialStats, sub, merchant] = await Promise.all([
     getDashboardStats(shop),
-    prisma.codOrder.findMany({
-      where: { shopDomain: shop },
-      orderBy: { createdAt: "desc" },
-      take: 50,
-      select: {
-        id: true,
-        orderNumber: true,
-        shopifyOrderId: true,
-        riskScore: true,
-        riskLevel: true,
-        action: true,
-        signalsTriggered: true,
-        isBlocked: true,
-        rtoConfirmed: true,
-        orderValue: true,
-        createdAt: true,
-      },
-    }),
     getOrCreateSubscription(shop),
     prisma.merchant.findUnique({ where: { shopDomain: shop } }),
   ]);
 
   // Fresh install with no orders → send to onboarding wizard
-  if (!merchant || (!merchant.onboardingCompleted && stats.totalOrders === 0)) {
+  if (!merchant || (!merchant.onboardingCompleted && initialStats.totalOrders === 0)) {
     throw redirect("/app/onboarding");
   }
 
@@ -126,11 +122,105 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   const plan = (activeSub.plan in PLANS ? activeSub.plan : "free") as PlanKey;
   const limit = PLANS[plan].limit;
-  const usagePct = limit === -1 ? 0 : Math.min(100, (activeSub.ordersThisMonth / limit) * 100);
+
+  // Auto-scan: pull last 20 Shopify orders and save any new COD orders.
+  // This runs on every loader call (including the 30s poll) so orders appear
+  // automatically even when webhook delivery is broken.
+  try {
+    const res = await admin.graphql(RECENT_ORDERS_QUERY);
+    const { data } = await res.json();
+    if (data?.orders) {
+      const rawOrders = (data.orders.edges ?? []).map(
+        (e: { node: unknown }) => e.node as Record<string, unknown>
+      );
+      const rules = await getMerchantRules(shop);
+
+      for (const o of rawOrders) {
+        const gatewayNames = (o.paymentGatewayNames as string[]) ?? [];
+        if (!isCOD(gatewayNames)) continue;
+
+        const gid = o.id as string;
+        const dup = await prisma.codOrder.findFirst({
+          where: { shopDomain: shop, shopifyOrderId: gid },
+          select: { id: true },
+        });
+        if (dup) continue;
+
+        const billing = await incrementOrderCount(shop);
+        if (!billing.allowed) break;
+
+        const lineItems = (
+          (o.lineItems as { edges: { node: { quantity: number } }[] })?.edges ?? []
+        ).map((e) => ({ quantity: e.node.quantity }));
+
+        const order: OrderInput = {
+          shopifyOrderId: gid,
+          orderNumber: ((o.name as string) ?? "").replace("#", ""),
+          paymentMethod: gatewayNames.join(", "),
+          totalPrice: parseFloat(
+            (o.totalPriceSet as { shopMoney: { amount: string } })?.shopMoney?.amount ?? "0"
+          ),
+          lineItems,
+          createdAt: (o.createdAt as string) ?? new Date().toISOString(),
+          ip: (o.clientIp as string) ?? null,
+          customer: o.customer
+            ? {
+                id: String((o.customer as { legacyResourceId: string }).legacyResourceId),
+                phone: (o.customer as { phone?: string | null }).phone ?? null,
+                email: (o.customer as { email?: string | null }).email ?? null,
+                ordersCount: Number(
+                  (o.customer as { numberOfOrders?: number }).numberOfOrders ?? 0
+                ),
+              }
+            : null,
+          shippingAddress: o.shippingAddress
+            ? {
+                address1: (o.shippingAddress as { address1?: string }).address1 ?? null,
+                city: (o.shippingAddress as { city?: string }).city ?? null,
+                zip: (o.shippingAddress as { zip?: string }).zip ?? null,
+                phone: (o.shippingAddress as { phone?: string | null }).phone ?? null,
+              }
+            : null,
+        };
+
+        const phone = order.customer?.phone ?? order.shippingAddress?.phone ?? null;
+        const email = order.customer?.email ?? null;
+        const pincode = order.shippingAddress?.zip ?? null;
+
+        const [customerHistory, pincodeStats, ipStats] = await Promise.all([
+          getCustomerHistory(shop, phone, email),
+          getPincodeStats(shop, pincode),
+          getIpStats(shop, order.ip, 60),
+        ]);
+
+        const result = scoreOrder(order, customerHistory, pincodeStats, ipStats, rules);
+
+        await Promise.all([
+          saveRiskResult(shop, order, result),
+          updatePincodeStats(shop, order, false),
+          ensureMerchant(shop),
+        ]);
+      }
+    }
+  } catch (scanErr) {
+    console.error("[COD Shield] Auto-scan error in loader:", scanErr);
+  }
+
+  // Re-query after auto-scan so any newly saved orders are included
+  const [stats, orders] = await Promise.all([
+    getDashboardStats(shop),
+    prisma.codOrder.findMany({
+      where: { shopDomain: shop },
+      orderBy: { createdAt: "desc" },
+      take: 50,
+      select: ORDER_FIELDS_SELECT,
+    }),
+  ]);
 
   // Flush any webhook jobs that were queued but not yet processed
   scheduleWebhookJobDrain();
 
+  const usagePct = limit === -1 ? 0 : Math.min(100, (activeSub.ordersThisMonth / limit) * 100);
   return { stats, orders, shop, plan, ordersThisMonth: activeSub.ordersThisMonth, limit, usagePct };
 };
 
