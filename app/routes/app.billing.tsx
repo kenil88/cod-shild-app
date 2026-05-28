@@ -183,12 +183,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (result?.userErrors?.length > 0) {
     const errMsg = result.userErrors[0].message as string;
-    // In development, Managed Pricing apps can't use the Billing API — activate the plan directly
-    if (
-      process.env.NODE_ENV !== "production" &&
-      errMsg.toLowerCase().includes("managed pricing")
-    ) {
-      await activatePlan(shop, plan, `dev-bypass-${Date.now()}`);
+    // Managed Pricing apps can't use the Billing API — activate the plan directly in the DB
+    if (errMsg.toLowerCase().includes("managed pricing")) {
+      await activatePlan(shop, plan, `managed-${Date.now()}`);
       return { confirmationUrl: null, error: null, devActivated: plan as string };
     }
     return { confirmationUrl: null, error: errMsg };
@@ -256,12 +253,11 @@ export default function BillingPage() {
     }
   }, [fetcher.data, shopify]);
 
-  // Dev bypass: managed pricing apps can't use Billing API in development
   useEffect(() => {
     const activated = fetcher.data?.devActivated;
     if (activated) {
       const planName = PLANS[activated as PlanKey]?.name ?? activated;
-      shopify.toast.show(`[Dev] Activated ${planName} plan (Shopify billing bypassed).`);
+      shopify.toast.show(`Switched to ${planName} plan.`);
     }
   }, [fetcher.data, shopify]);
 
