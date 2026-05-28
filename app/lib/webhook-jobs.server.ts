@@ -17,7 +17,7 @@ import { getOrCreateSubscription, incrementOrderCount, isActiveSubscription } fr
 
 const MAX_ATTEMPTS = 5;
 const BATCH_SIZE = 5;
-const COD_KEYWORDS = ["cash on delivery", "cod", "pay on delivery", "manual"];
+const COD_KEYWORDS = ["cash on delivery", "cash-on-delivery", "cod", "pay on delivery", "pod", "manual"];
 
 let workerRunning = false;
 
@@ -252,8 +252,11 @@ function buildOrderInput(o: Record<string, unknown>): OrderInput {
 async function processOrderCreate(shop: string, payload: Prisma.JsonValue) {
   const rawPayload = asRecord(payload);
   const gatewayNamesFromPayload = (rawPayload.payment_gateway_names as string[]) ?? [];
+  const singleGateway = (rawPayload.payment_gateway as string) ?? "";
+  const allGatewayIds = [...gatewayNamesFromPayload];
+  if (singleGateway) allGatewayIds.push(singleGateway);
 
-  if (gatewayNamesFromPayload.length > 0 && !isCOD(gatewayNamesFromPayload)) {
+  if (allGatewayIds.length > 0 && !isCOD(allGatewayIds)) {
     return;
   }
 

@@ -4,7 +4,7 @@ import type {
   LoaderFunctionArgs,
 } from "react-router";
 import { useLoaderData, useFetcher, useRevalidator } from "react-router";
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
@@ -360,12 +360,13 @@ function rowBg(level: string, rtoConfirmed: boolean) {
 const POLL_INTERVAL_MS = 30_000;
 
 export default function Dashboard() {
-  const { stats, orders, plan, ordersThisMonth, limit, usagePct } = useLoaderData<typeof loader>();
+  const { stats, orders, shop, plan, ordersThisMonth, limit, usagePct } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const revalidator = useRevalidator();
   const shopify = useAppBridge();
   const isScanning = fetcher.state !== "idle";
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
+  const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Auto-poll: re-fetch loader data every 30 s so new webhook-processed orders appear
@@ -464,40 +465,64 @@ export default function Dashboard() {
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
               <thead>
                 <tr>
-                  {["Order", "Score", "Level", "Signals Triggered", "Date", ""].map((h) => (
+                  {["Order ↕", "Score", "Level", "Signals Triggered", "Date", ""].map((h) => (
                     <th key={h} style={thStyle}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {orders.map((o) => (
-                  <tr key={o.id} style={{ background: rowBg(o.riskLevel, o.rtoConfirmed) }}>
-                    <td style={tdStyle}>
-                      <div style={{ fontWeight: 700 }}>#{o.orderNumber}</div>
-                      {o.isBlocked && (
-                        <span style={{ fontSize: 11, color: "#d72c0d", fontWeight: 600 }}>BLOCKED</span>
+                {orders.map((o) => {
+                  const isExpanded = selectedOrderId === o.id;
+                  const numericId = o.shopifyOrderId.replace(/.*\//, "");
+                  return (
+                    <Fragment key={o.id}>
+                      <tr
+                        onClick={() => setSelectedOrderId(isExpanded ? null : o.id)}
+                        style={{
+                          background: rowBg(o.riskLevel, o.rtoConfirmed),
+                          cursor: "pointer",
+                          borderBottom: isExpanded ? "none" : undefined,
+                        }}
+                      >
+                        <td style={tdStyle}>
+                          <div style={{ fontWeight: 700, color: "#008060" }}>#{o.orderNumber}</div>
+                          {o.isBlocked && (
+                            <span style={{ fontSize: 11, color: "#d72c0d", fontWeight: 600 }}>BLOCKED</span>
+                          )}
+                        </td>
+                        <td style={tdStyle}>
+                          <ScoreBar score={o.riskScore} level={o.riskLevel} />
+                        </td>
+                        <td style={tdStyle}>
+                          <LevelBadge level={o.riskLevel} />
+                        </td>
+                        <td style={{ ...tdStyle, maxWidth: 280 }}>
+                          <SignalChips signals={o.signalsTriggered} />
+                        </td>
+                        <td style={{ ...tdStyle, whiteSpace: "nowrap", color: "#6d7175" }}>
+                          {new Date(o.createdAt).toLocaleDateString("en-IN", {
+                            day: "2-digit", month: "short", year: "numeric",
+                            hour: "2-digit", minute: "2-digit",
+                          })}
+                        </td>
+                        <td style={tdStyle} onClick={(e) => e.stopPropagation()}>
+                          <MarkRTOButton orderId={o.id} rtoConfirmed={o.rtoConfirmed} />
+                        </td>
+                      </tr>
+                      {isExpanded && (
+                        <tr style={{ background: rowBg(o.riskLevel, o.rtoConfirmed) }}>
+                          <td colSpan={6} style={{ padding: "0 14px 16px" }}>
+                            <OrderDetailPanel
+                              order={o}
+                              shop={shop}
+                              numericId={numericId}
+                            />
+                          </td>
+                        </tr>
                       )}
-                    </td>
-                    <td style={tdStyle}>
-                      <ScoreBar score={o.riskScore} level={o.riskLevel} />
-                    </td>
-                    <td style={tdStyle}>
-                      <LevelBadge level={o.riskLevel} />
-                    </td>
-                    <td style={{ ...tdStyle, maxWidth: 280 }}>
-                      <SignalChips signals={o.signalsTriggered} />
-                    </td>
-                    <td style={{ ...tdStyle, whiteSpace: "nowrap", color: "#6d7175" }}>
-                      {new Date(o.createdAt).toLocaleDateString("en-IN", {
-                        day: "2-digit", month: "short", year: "numeric",
-                        hour: "2-digit", minute: "2-digit",
-                      })}
-                    </td>
-                    <td style={tdStyle}>
-                      <MarkRTOButton orderId={o.id} rtoConfirmed={o.rtoConfirmed} />
-                    </td>
-                  </tr>
-                ))}
+                    </Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -657,6 +682,125 @@ function EmptyState({ onScan, isScanning }: { onScan: () => void; isScanning: bo
       >
         {isScanning ? "Scanning..." : "Scan Recent Orders"}
       </button>
+    </div>
+  );
+}
+
+function OrderDetailPanel({
+  order,
+  shop,
+  numericId,
+}: {
+  order: {
+    orderNumber: string;
+    riskScore: number;
+    riskLevel: string;
+    action: string;
+    signalsTriggered: unknown;
+    isBlocked: boolean;
+    rtoConfirmed: boolean;
+    orderValue: number;
+    createdAt: string | Date;
+  };
+  shop: string;
+  numericId: string;
+}) {
+  const signals = (Array.isArray(order.signalsTriggered) ? order.signalsTriggered : []) as SignalKey[];
+  const adminUrl = `https://${shop}/admin/orders/${numericId}`;
+
+  const actionColor =
+    order.action === "cancel" ? "#d72c0d" : order.action === "review" ? "#b98900" : "#1a7a4a";
+  const actionLabel =
+    order.action === "cancel" ? "Cancel / Block" : order.action === "review" ? "Review" : "Approve";
+
+  return (
+    <div
+      style={{
+        borderTop: "1px solid #e4e5e7",
+        paddingTop: 14,
+        display: "flex",
+        flexWrap: "wrap",
+        gap: 24,
+      }}
+    >
+      {/* Score breakdown */}
+      <div style={{ minWidth: 180 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: "#6d7175", textTransform: "uppercase", marginBottom: 6 }}>
+          Risk Analysis
+        </div>
+        <div style={{ fontSize: 28, fontWeight: 900, color: levelColor(order.riskLevel as "safe" | "medium" | "high") }}>
+          {order.riskScore}
+          <span style={{ fontSize: 13, fontWeight: 500, color: "#6d7175" }}>/100</span>
+        </div>
+        <div style={{ marginTop: 4 }}>
+          <LevelBadge level={order.riskLevel} />
+        </div>
+        <div style={{ marginTop: 8, fontSize: 12 }}>
+          <span style={{ fontWeight: 600, color: "#3d4147" }}>Recommended action: </span>
+          <span style={{ fontWeight: 700, color: actionColor }}>{actionLabel}</span>
+        </div>
+        {order.orderValue > 0 && (
+          <div style={{ marginTop: 4, fontSize: 12, color: "#6d7175" }}>
+            Order value: ₹{order.orderValue.toLocaleString("en-IN", { maximumFractionDigits: 2 })}
+          </div>
+        )}
+      </div>
+
+      {/* Signals */}
+      <div style={{ flex: 1, minWidth: 200 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: "#6d7175", textTransform: "uppercase", marginBottom: 6 }}>
+          Signals Triggered ({signals.length})
+        </div>
+        {signals.length === 0 ? (
+          <div style={{ fontSize: 12, color: "#8c9196" }}>No risk signals detected — order looks safe.</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {signals.map((k) => (
+              <div key={k} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#d72c0d", flexShrink: 0, display: "inline-block" }} />
+                <span style={{ fontSize: 12, fontWeight: 600, color: "#3d4147" }}>
+                  {SIGNAL_LABELS[k] ?? k}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Status & link */}
+      <div style={{ minWidth: 140 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: "#6d7175", textTransform: "uppercase", marginBottom: 6 }}>
+          Status
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {order.isBlocked && (
+            <span style={{ fontSize: 12, fontWeight: 700, color: "#d72c0d" }}>Blocked / Cancelled</span>
+          )}
+          {order.rtoConfirmed && (
+            <span style={{ fontSize: 12, fontWeight: 700, color: "#d72c0d" }}>RTO Confirmed</span>
+          )}
+          {!order.isBlocked && !order.rtoConfirmed && (
+            <span style={{ fontSize: 12, color: "#1a7a4a", fontWeight: 600 }}>Active</span>
+          )}
+        </div>
+        <a
+          href={adminUrl}
+          target="_top"
+          style={{
+            display: "inline-block",
+            marginTop: 12,
+            fontSize: 12,
+            fontWeight: 600,
+            color: "#008060",
+            textDecoration: "none",
+            border: "1px solid #008060",
+            borderRadius: 6,
+            padding: "4px 12px",
+          }}
+        >
+          View in Shopify ↗
+        </a>
+      </div>
     </div>
   );
 }

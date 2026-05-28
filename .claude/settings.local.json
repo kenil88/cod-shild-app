@@ -20,7 +20,9 @@
       "Bash(xargs grep -l \"redirect\")",
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(xargs grep -l \"codOrderId\\\\|CodOrder\")",
+      "Bash(xargs grep -l \"useParams\\\\|dynamic route\")"
     ]
   }
 }
