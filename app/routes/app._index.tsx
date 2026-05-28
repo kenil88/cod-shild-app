@@ -20,6 +20,7 @@ import {
 } from "../lib/db.server";
 import { scoreOrder, type OrderInput, type SignalKey, levelColor } from "../lib/riskEngine";
 import { incrementOrderCount, getOrCreateSubscription, activatePlan } from "../lib/billing.server";
+import { scheduleWebhookJobDrain } from "../lib/webhook-jobs.server";
 import { PLANS, type PlanKey } from "../lib/plans";
 import prisma from "../db.server";
 
@@ -126,6 +127,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const plan = (activeSub.plan in PLANS ? activeSub.plan : "free") as PlanKey;
   const limit = PLANS[plan].limit;
   const usagePct = limit === -1 ? 0 : Math.min(100, (activeSub.ordersThisMonth / limit) * 100);
+
+  // Flush any webhook jobs that were queued but not yet processed
+  scheduleWebhookJobDrain();
 
   return { stats, orders, shop, plan, ordersThisMonth: activeSub.ordersThisMonth, limit, usagePct };
 };
