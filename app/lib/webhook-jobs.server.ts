@@ -209,6 +209,50 @@ const CANCEL_MUTATION = `#graphql
   }
 `;
 
+const RISK_ASSESSMENT_MUTATION = `#graphql
+  mutation OrderRiskAssessmentCreate($orderRiskAssessmentInput: OrderRiskAssessmentCreateInput!) {
+    orderRiskAssessmentCreate(orderRiskAssessmentInput: $orderRiskAssessmentInput) {
+      orderRiskAssessment { riskLevel }
+      userErrors { field message }
+    }
+  }
+`;
+
+const SIGNAL_FACTS: Record<string, string> = {
+  new_customer: "New customer with no previous order history",
+  high_rto_pincode: "Delivery pincode has a high return-to-origin rate",
+  unusual_quantity: "Unusual item quantity detected in order",
+  night_order: "Order placed during unusual hours",
+  incomplete_address: "Incomplete or suspicious shipping address",
+  past_rto_history: "Customer has previous return-to-origin history",
+  multiple_addresses: "Customer has used multiple shipping addresses",
+  order_velocity: "High order frequency from this customer",
+};
+
+function toShopifyRiskLevel(level: string): string {
+  if (level === "high") return "HIGH";
+  if (level === "medium") return "MEDIUM";
+  return "LOW";
+}
+
+export function buildRiskAssessmentVars(orderId: string, score: number, level: string, triggeredSignals: string[]) {
+  const facts = triggeredSignals.map((s) => ({
+    description: SIGNAL_FACTS[s] ?? s,
+    sentiment: "NEGATIVE",
+  }));
+  facts.unshift({
+    description: `COD Shield risk score: ${score}/100`,
+    sentiment: level === "safe" ? "POSITIVE" : "NEGATIVE",
+  });
+  return {
+    orderRiskAssessmentInput: {
+      orderId,
+      riskLevel: toShopifyRiskLevel(level),
+      facts,
+    },
+  };
+}
+
 function asRecord(payload: Prisma.JsonValue): Record<string, unknown> {
   return payload && typeof payload === "object" && !Array.isArray(payload)
     ? (payload as Record<string, unknown>)
@@ -330,7 +374,7 @@ async function processOrderCreate(shop: string, payload: Prisma.JsonValue) {
     ensureMerchant(shop),
   ]);
 
-  // Admin API operations (add note, tag, cancel) are best-effort.
+  // Admin API operations (note, risk assessment, tag, cancel) are best-effort.
   // A failure here must NOT prevent the order from being recorded.
   try {
     const { admin } = await unauthenticated.admin(shop);
@@ -339,6 +383,11 @@ async function processOrderCreate(shop: string, payload: Prisma.JsonValue) {
 
     await admin.graphql(ORDER_NOTE_MUTATION, {
       variables: { input: { id: gid, note: orderNote } },
+    });
+
+    // Submit risk assessment — populates the "Order risk" panel in Shopify admin
+    await admin.graphql(RISK_ASSESSMENT_MUTATION, {
+      variables: buildRiskAssessmentVars(gid, result.score, result.level, result.triggeredSignals),
     });
 
     if (result.level !== "safe" && billing.plan !== "free") {

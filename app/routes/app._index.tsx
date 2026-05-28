@@ -20,7 +20,7 @@ import {
 } from "../lib/db.server";
 import { scoreOrder, type OrderInput, type SignalKey, levelColor } from "../lib/riskEngine";
 import { incrementOrderCount, getOrCreateSubscription, activatePlan } from "../lib/billing.server";
-import { scheduleWebhookJobDrain } from "../lib/webhook-jobs.server";
+import { scheduleWebhookJobDrain, buildRiskAssessmentVars } from "../lib/webhook-jobs.server";
 import { PLANS, type PlanKey } from "../lib/plans";
 import prisma from "../db.server";
 
@@ -72,6 +72,15 @@ const CANCEL_MUTATION = `#graphql
   mutation CancelOrder($orderId: ID!, $reason: OrderCancelReason!, $notifyCustomer: Boolean!, $restock: Boolean!) {
     orderCancel(orderId: $orderId, reason: $reason, notifyCustomer: $notifyCustomer, restock: $restock) {
       orderCancelUserErrors { field message }
+    }
+  }
+`;
+
+const RISK_ASSESSMENT_MUTATION = `#graphql
+  mutation OrderRiskAssessmentCreate($orderRiskAssessmentInput: OrderRiskAssessmentCreateInput!) {
+    orderRiskAssessmentCreate(orderRiskAssessmentInput: $orderRiskAssessmentInput) {
+      orderRiskAssessment { riskLevel }
+      userErrors { field message }
     }
   }
 `;
@@ -200,6 +209,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           updatePincodeStats(shop, order, false),
           ensureMerchant(shop),
         ]);
+
+        // Submit risk assessment so "Order risk" panel shows our data
+        await admin.graphql(RISK_ASSESSMENT_MUTATION, {
+          variables: buildRiskAssessmentVars(gid, result.score, result.level, result.triggeredSignals),
+        });
       }
     }
   } catch (scanErr) {
@@ -249,21 +263,35 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const gatewayNames = (o.paymentGatewayNames as string[]) ?? [];
       if (!isCOD(gatewayNames)) { skipped++; continue; }
 
+      const gid = o.id as string;
       const orderNum = ((o.name as string) ?? "").replace("#", "");
-      const existing = await prisma.codOrder.findFirst({ where: { shopDomain: shop, orderNumber: orderNum } });
-      if (existing) { skipped++; continue; }
+      const existing = await prisma.codOrder.findFirst({
+        where: { shopDomain: shop, shopifyOrderId: gid },
+        select: { id: true, riskScore: true, riskLevel: true, signalsTriggered: true },
+      });
 
-      // Check billing limit before doing any work for this order
+      if (existing) {
+        // Already scored — just (re-)submit the risk assessment to Shopify so it
+        // shows up in the "Order risk" panel instead of "Analysis not available".
+        const signals = (Array.isArray(existing.signalsTriggered) ? existing.signalsTriggered : []) as string[];
+        await admin.graphql(RISK_ASSESSMENT_MUTATION, {
+          variables: buildRiskAssessmentVars(gid, existing.riskScore, existing.riskLevel, signals),
+        });
+        skipped++;
+        continue;
+      }
+
+      // New order — check billing limit before doing any work
       const billing = await incrementOrderCount(shop);
       if (!billing.allowed) {
         skipped++;
-        break; // stop scanning — merchant is at their plan limit
+        break; // merchant is at their plan limit
       }
 
       const lineItems = ((o.lineItems as { edges: { node: { quantity: number } }[] })?.edges ?? []).map((e) => ({ quantity: e.node.quantity }));
 
       const order: OrderInput = {
-        shopifyOrderId: o.id as string,
+        shopifyOrderId: gid,
         orderNumber: orderNum,
         paymentMethod: gatewayNames.join(", "),
         totalPrice: parseFloat((o.totalPriceSet as { shopMoney: { amount: string } })?.shopMoney?.amount ?? "0"),
@@ -301,10 +329,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         updatePincodeStats(shop, order, false),
       ]);
 
+      // Submit risk assessment — shows up in Shopify "Order risk" panel
+      await admin.graphql(RISK_ASSESSMENT_MUTATION, {
+        variables: buildRiskAssessmentVars(gid, result.score, result.level, result.triggeredSignals),
+      });
+
       // Auto-tag (Starter+ only)
       if (result.level !== "safe" && billing.plan !== "free") {
         const tag = result.level === "high" ? "cod-high-risk" : "cod-medium-risk";
-        await admin.graphql(TAG_MUTATION, { variables: { id: o.id as string, tags: [tag, "cod-shield"] } });
+        await admin.graphql(TAG_MUTATION, { variables: { id: gid, tags: [tag, "cod-shield"] } });
       }
 
       // Auto-cancel (Growth+ only, high-value orders excluded)
@@ -312,7 +345,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const isHighValue = order.totalPrice >= (rules.highValueThreshold ?? 5000);
       if (result.action === "cancel" && rules.autoCancel && isGrowthPlus && !isHighValue) {
         await admin.graphql(CANCEL_MUTATION, {
-          variables: { orderId: o.id as string, reason: "FRAUD", notifyCustomer: false, restock: true },
+          variables: { orderId: gid, reason: "FRAUD", notifyCustomer: false, restock: true },
         });
       }
 
