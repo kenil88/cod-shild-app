@@ -219,6 +219,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { confirmationUrl: null, error: null, downgraded: true, devActivated: null };
   }
 
+  // Dev bypass: activates plan directly for a specific store (set DEV_BILLING_BYPASS_STORE env var)
+  // Safe in production — only the named dev store is bypassed, real merchant stores never match
+  if (process.env.DEV_BILLING_BYPASS_STORE === shop) {
+    await activatePlan(shop, plan, `dev-bypass-${Date.now()}`);
+    return { confirmationUrl: null, error: null, devActivated: plan, managedPricing: false };
+  }
+
   // Paid plan: create Shopify recurring subscription
   const origin = new URL(request.url).origin;
   const returnUrl = `${origin}/app/billing`;
@@ -452,24 +459,23 @@ export default function BillingPage() {
             }}
           >
             <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 8 }}>
-              ⚠️ Billing blocked — Managed Pricing is enabled in Shopify Partners
+              ⚠️ Managed Pricing is active — Billing API is blocked
             </div>
             <p style={{ margin: "0 0 10px" }}>
-              Your app has pricing plans configured in the Shopify Partners dashboard, which
-              prevents the Billing API from working. Because this app is not yet listed in the
-              Shopify App Store, merchants cannot select a plan through Shopify's managed billing
-              either.
+              Your app has pricing plans set up in Shopify Partners (required for App Store submission),
+              which blocks the in-app Billing API. This is expected during the review process.
             </p>
-            <p style={{ margin: "0 0 6px", fontWeight: 700 }}>To fix — remove Managed Pricing from Partners:</p>
-            <ol style={{ margin: "0 0 10px", paddingLeft: 20 }}>
-              <li>Go to <a href="https://partners.shopify.com" target="_blank" rel="noreferrer" style={{ color: "#b95000" }}>partners.shopify.com</a> → Apps → COD Shield - RTO Prevention</li>
-              <li>Open <strong>Distribution</strong> → <strong>Pricing plans</strong> (or the <strong>Pricing</strong> tab)</li>
-              <li>Delete every configured pricing plan</li>
-              <li>Save, then come back and refresh this page</li>
-            </ol>
-            <p style={{ margin: 0, color: "#7a4100" }}>
-              After removing the plans the Upgrade buttons will work normally using Shopify's Billing API.
-            </p>
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontWeight: 700, marginBottom: 4 }}>For your dev store (testing):</div>
+              Add <code style={{ background: "#fde8cc", padding: "1px 6px", borderRadius: 4 }}>DEV_BILLING_BYPASS_STORE=cod-shield.myshopify.com</code> to
+              your Railway environment variables, then redeploy.
+              Upgrade buttons will activate plans directly — safe because only your dev store is bypassed.
+            </div>
+            <div>
+              <div style={{ fontWeight: 700, marginBottom: 4 }}>For the App Store reviewer:</div>
+              They will select a plan during installation from the Partners dashboard.
+              The app will automatically detect and display the correct plan.
+            </div>
           </div>
         </s-section>
       )}
