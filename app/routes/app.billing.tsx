@@ -291,7 +291,7 @@ const FEATURES: Record<PlanKey, string[]> = {
 // ─── Billing page ─────────────────────────────────────────────────────────────
 
 export default function BillingPage() {
-  const { plan: currentPlan, status, hasActiveSubscription, ordersThisMonth, limit, usagePct, billingDeclined } =
+  const { plan: currentPlan, status, hasActiveSubscription, ordersThisMonth, limit, usagePct, billingDeclined, managedPricingUrl } =
     useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const shopify = useAppBridge();
@@ -309,12 +309,19 @@ export default function BillingPage() {
     }
   }, [fetcher.data]);
 
-  // For Managed Pricing apps, show an in-app banner (redirect leads to "No plan selected" for unlisted apps)
+  // For Managed Pricing apps:
+  // - Live (App Store listed) stores: redirect to Shopify admin billing page where plans are selectable
+  // - Unlisted dev stores (no managedPricingUrl): show in-app banner with dev instructions
   useEffect(() => {
     if (fetcher.data?.managedPricing) {
-      setManagedPricingBlocked(true);
+      if (managedPricingUrl) {
+        shopify.toast.show("Opening Shopify billing to change your plan…");
+        (window.top ?? window).location.href = managedPricingUrl;
+      } else {
+        setManagedPricingBlocked(true);
+      }
     }
-  }, [fetcher.data]);
+  }, [fetcher.data, managedPricingUrl, shopify]);
 
   // Show toast on successful downgrade to free and refresh loader data
   useEffect(() => {
