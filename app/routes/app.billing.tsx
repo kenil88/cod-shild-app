@@ -1,6 +1,6 @@
 import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { redirect, useLoaderData, useFetcher } from "react-router";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
@@ -300,6 +300,7 @@ export default function BillingPage() {
   const isLoading = fetcher.state !== "idle";
   const submittedPlan = fetcher.formData?.get("plan") as string | null;
   const error = fetcher.data?.error;
+  const [managedPricingBlocked, setManagedPricingBlocked] = useState(false);
 
   // Escape the Shopify iframe and navigate to Shopify's billing confirmation page
   useEffect(() => {
@@ -309,13 +310,12 @@ export default function BillingPage() {
     }
   }, [fetcher.data]);
 
-  // For Managed Pricing apps, redirect to the Shopify admin app billing page
+  // For Managed Pricing apps, show an in-app banner (redirect leads to "No plan selected" for unlisted apps)
   useEffect(() => {
-    if (fetcher.data?.managedPricing && managedPricingUrl) {
-      shopify.toast.show("Opening Shopify billing — select your plan there.");
-      (window.top ?? window).location.href = managedPricingUrl;
+    if (fetcher.data?.managedPricing) {
+      setManagedPricingBlocked(true);
     }
-  }, [fetcher.data, managedPricingUrl, shopify]);
+  }, [fetcher.data]);
 
   // Show toast on successful downgrade to free
   useEffect(() => {
@@ -433,6 +433,43 @@ export default function BillingPage() {
           >
             Your subscription wasn't activated. You've been placed on the Free plan — you can upgrade
             any time below.
+          </div>
+        </s-section>
+      )}
+
+      {/* ── Managed Pricing banner ── */}
+      {managedPricingBlocked && (
+        <s-section>
+          <div
+            style={{
+              padding: "16px 20px",
+              background: "#fff8f0",
+              border: "1px solid #ffc58b",
+              borderRadius: 8,
+              color: "#4a2900",
+              fontSize: 13,
+              lineHeight: 1.6,
+            }}
+          >
+            <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 8 }}>
+              ⚠️ Billing blocked — Managed Pricing is enabled in Shopify Partners
+            </div>
+            <p style={{ margin: "0 0 10px" }}>
+              Your app has pricing plans configured in the Shopify Partners dashboard, which
+              prevents the Billing API from working. Because this app is not yet listed in the
+              Shopify App Store, merchants cannot select a plan through Shopify's managed billing
+              either.
+            </p>
+            <p style={{ margin: "0 0 6px", fontWeight: 700 }}>To fix — remove Managed Pricing from Partners:</p>
+            <ol style={{ margin: "0 0 10px", paddingLeft: 20 }}>
+              <li>Go to <a href="https://partners.shopify.com" target="_blank" rel="noreferrer" style={{ color: "#b95000" }}>partners.shopify.com</a> → Apps → COD Shield - RTO Prevention</li>
+              <li>Open <strong>Distribution</strong> → <strong>Pricing plans</strong> (or the <strong>Pricing</strong> tab)</li>
+              <li>Delete every configured pricing plan</li>
+              <li>Save, then come back and refresh this page</li>
+            </ol>
+            <p style={{ margin: 0, color: "#7a4100" }}>
+              After removing the plans the Upgrade buttons will work normally using Shopify's Billing API.
+            </p>
           </div>
         </s-section>
       )}
