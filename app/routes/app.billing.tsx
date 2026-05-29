@@ -52,6 +52,19 @@ const CANCEL_SUBSCRIPTION = `#graphql
   }
 `;
 
+const GET_ACTIVE_SUBSCRIPTIONS = `#graphql
+  query GetActiveSubscriptions {
+    currentAppInstallation {
+      activeSubscriptions {
+        id
+        name
+        status
+        test
+      }
+    }
+  }
+`;
+
 // ─── Loader ───────────────────────────────────────────────────────────────────
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -65,16 +78,19 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   if (chargeId) {
     let billingDeclined = false;
     try {
-      const res = await admin.graphql(VERIFY_SUBSCRIPTION, {
-        variables: { id: chargeId },
-      });
+      // Use activeSubscriptions query — more reliable than node(id: chargeId) since
+      // Shopify may return a numeric or GID charge_id depending on API version.
+      const res = await admin.graphql(GET_ACTIVE_SUBSCRIPTIONS);
       const { data } = await res.json();
-      const node = data?.node as { id: string; name: string; status: string } | null;
+      const activeSubs = (data?.currentAppInstallation?.activeSubscriptions ?? []) as Array<{
+        id: string; name: string; status: string;
+      }>;
 
-      if (node?.status === "ACTIVE") {
-        const planKey = node.name.toLowerCase() as PlanKey;
+      if (activeSubs.length > 0) {
+        const shopifySub = activeSubs[0];
+        const planKey = shopifySub.name.toLowerCase() as PlanKey;
         if (planKey in PLANS) {
-          await activatePlan(shop, planKey, chargeId);
+          await activatePlan(shop, planKey, shopifySub.id);
 
           // Send upgrade confirmation email (best-effort)
           const merchant = await prisma.merchant.findUnique({
@@ -93,7 +109,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           }
         }
       } else {
-        // Charge was declined or not completed — fall back to free so merchant isn't locked out
+        // No active subscription on Shopify side — billing was declined or not completed
         billingDeclined = true;
         const existing = await getSubscription(shop);
         if (!isActiveSubscription(existing)) {
@@ -108,7 +124,41 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   const billingStatus = url.searchParams.get("billing_status");
 
-  const sub = await getSubscription(shop);
+  // Read subscription from DB and sync with Shopify's actual billing state
+  let sub = await getSubscription(shop);
+  try {
+    const res = await admin.graphql(GET_ACTIVE_SUBSCRIPTIONS);
+    const { data } = await res.json();
+    const activeSubs = (data?.currentAppInstallation?.activeSubscriptions ?? []) as Array<{
+      id: string; name: string; status: string;
+    }>;
+
+    if (activeSubs.length === 0) {
+      // Shopify has no active subscription — if DB shows a paid plan, reset to free
+      if (sub && sub.plan !== "free" && sub.status === "active") {
+        await activatePlan(shop, "free", null);
+        sub = await getSubscription(shop);
+      }
+    } else {
+      // Shopify has an active subscription — sync DB if out of date
+      const shopifySub = activeSubs[0];
+      const planKey = shopifySub.name.toLowerCase() as PlanKey;
+      if (planKey in PLANS && planKey !== "free") {
+        const needsSync =
+          !sub ||
+          sub.plan !== planKey ||
+          sub.status !== "active" ||
+          sub.shopifySubscriptionId !== shopifySub.id;
+        if (needsSync) {
+          await activatePlan(shop, planKey, shopifySub.id);
+          sub = await getSubscription(shop);
+        }
+      }
+    }
+  } catch (e) {
+    console.error("[COD Shield] Subscription sync failed:", e);
+  }
+
   const hasActiveSubscription = isActiveSubscription(sub);
   const plan = sub && sub.plan in PLANS ? (sub.plan as PlanKey) : "free";
   const limit = PLANS[plan].limit;
@@ -182,13 +232,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const result = data?.appSubscriptionCreate;
 
   if (result?.userErrors?.length > 0) {
-    const errMsg = result.userErrors[0].message as string;
-    // Managed Pricing apps can't use the Billing API — activate the plan directly in the DB
-    if (errMsg.toLowerCase().includes("managed pricing")) {
-      await activatePlan(shop, plan, `managed-${Date.now()}`);
-      return { confirmationUrl: null, error: null, devActivated: plan as string };
-    }
-    return { confirmationUrl: null, error: errMsg };
+    return { confirmationUrl: null, error: result.userErrors[0].message as string, devActivated: null };
   }
 
   return {
