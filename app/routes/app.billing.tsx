@@ -1,5 +1,5 @@
 import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { redirect, useLoaderData, useFetcher } from "react-router";
+import { redirect, useLoaderData, useFetcher, useRevalidator } from "react-router";
 import { useEffect, useState } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { useAppBridge } from "@shopify/app-bridge-react";
@@ -304,6 +304,7 @@ export default function BillingPage() {
     useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const shopify = useAppBridge();
+  const { revalidate } = useRevalidator();
   const isLoading = fetcher.state !== "idle";
   const submittedPlan = fetcher.formData?.get("plan") as string | null;
   const error = fetcher.data?.error;
@@ -324,20 +325,22 @@ export default function BillingPage() {
     }
   }, [fetcher.data]);
 
-  // Show toast on successful downgrade to free
+  // Show toast on successful downgrade to free and refresh loader data
   useEffect(() => {
     if (fetcher.data?.downgraded) {
       shopify.toast.show("Downgraded to Free plan.");
+      revalidate();
     }
-  }, [fetcher.data, shopify]);
+  }, [fetcher.data, shopify, revalidate]);
 
   useEffect(() => {
     const activated = fetcher.data?.devActivated;
     if (activated) {
       const planName = PLANS[activated as PlanKey]?.name ?? activated;
       shopify.toast.show(`Switched to ${planName} plan.`);
+      revalidate();
     }
-  }, [fetcher.data, shopify]);
+  }, [fetcher.data, shopify, revalidate]);
 
   return (
     <s-page heading="COD Shield — Billing">
