@@ -146,8 +146,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }
 
     if (activeSubs.length === 0) {
-      // Shopify has no active subscription — if DB shows a paid plan, reset to free
-      if (sub && sub.plan !== "free" && sub.status === "active") {
+      // Shopify has no active subscription — reset to free UNLESS it's a dev bypass activation
+      const isDevBypass = sub?.shopifySubscriptionId?.startsWith("dev-bypass-");
+      if (sub && sub.plan !== "free" && sub.status === "active" && !isDevBypass) {
         await activatePlan(shop, "free", null);
         sub = await getSubscription(shop);
       }
