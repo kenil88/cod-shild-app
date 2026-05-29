@@ -232,13 +232,26 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const result = data?.appSubscriptionCreate;
 
   if (result?.userErrors?.length > 0) {
-    return { confirmationUrl: null, error: result.userErrors[0].message as string, devActivated: null };
+    const errMsg = result.userErrors[0].message as string;
+    // Managed Pricing apps can't use the Billing API — redirect merchant to Shopify admin
+    if (errMsg.includes("Managed Pricing") || errMsg.includes("managed pricing")) {
+      const shopHandle = shop.replace(".myshopify.com", "");
+      const apiKey = process.env.SHOPIFY_API_KEY ?? "";
+      return {
+        confirmationUrl: null,
+        error: null,
+        devActivated: null,
+        managedPricingUrl: `https://admin.shopify.com/store/${shopHandle}/apps/${apiKey}`,
+      };
+    }
+    return { confirmationUrl: null, error: errMsg, devActivated: null };
   }
 
   return {
     confirmationUrl: (result?.confirmationUrl as string) ?? null,
     error: null,
     devActivated: null,
+    managedPricingUrl: null,
   };
 };
 
@@ -289,6 +302,15 @@ export default function BillingPage() {
       (window.top ?? window).location.href = url;
     }
   }, [fetcher.data]);
+
+  // For Managed Pricing apps, redirect to Shopify admin to select a plan
+  useEffect(() => {
+    const url = fetcher.data?.managedPricingUrl;
+    if (url) {
+      shopify.toast.show("Opening Shopify billing — select your plan there.");
+      (window.top ?? window).location.href = url;
+    }
+  }, [fetcher.data, shopify]);
 
   // Show toast on successful downgrade to free
   useEffect(() => {
