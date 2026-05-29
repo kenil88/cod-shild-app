@@ -31,17 +31,6 @@ const CREATE_SUBSCRIPTION = `#graphql
   }
 `;
 
-const VERIFY_SUBSCRIPTION = `#graphql
-  query VerifySubscription($id: ID!) {
-    node(id: $id) {
-      ... on AppSubscription {
-        id
-        name
-        status
-      }
-    }
-  }
-`;
 
 const CANCEL_SUBSCRIPTION = `#graphql
   mutation AppSubscriptionCancel($id: ID!) {
@@ -220,9 +209,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { confirmationUrl: null, error: null, downgraded: true, devActivated: null };
   }
 
-  // Dev bypass: activates plan directly for a specific store (set DEV_BILLING_BYPASS_STORE env var)
-  // Safe in production — only the named dev store is bypassed, real merchant stores never match
-  if (process.env.DEV_BILLING_BYPASS_STORE === shop) {
+  // Dev bypass: activates plan directly for listed stores (comma-separated DEV_BILLING_BYPASS_STORE)
+  // Safe in production — only named dev stores are bypassed, real merchant stores never match
+  const bypassStores = (process.env.DEV_BILLING_BYPASS_STORE ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  if (bypassStores.includes(shop)) {
     await activatePlan(shop, plan, `dev-bypass-${Date.now()}`);
     return { confirmationUrl: null, error: null, devActivated: plan, managedPricing: false };
   }
@@ -301,7 +291,7 @@ const FEATURES: Record<PlanKey, string[]> = {
 // ─── Billing page ─────────────────────────────────────────────────────────────
 
 export default function BillingPage() {
-  const { plan: currentPlan, status, hasActiveSubscription, ordersThisMonth, limit, usagePct, billingDeclined, managedPricingUrl } =
+  const { plan: currentPlan, status, hasActiveSubscription, ordersThisMonth, limit, usagePct, billingDeclined } =
     useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const shopify = useAppBridge();

@@ -260,7 +260,18 @@ function Step1({ onNext, onSkip }: { onNext: () => void; onSkip: () => void }) {
 // ─── Step 2: Plan ─────────────────────────────────────────────────────────────
 
 function Step2({ plan, onBack, onNext }: { plan: PlanKey; onBack: () => void; onNext: () => void }) {
+  const [selected, setSelected] = useState<PlanKey>(plan);
   const planList = Object.entries(PLANS) as [PlanKey, typeof PLANS[PlanKey]][];
+  const isPaid = selected !== "free";
+
+  const handleContinue = () => {
+    if (isPaid) {
+      // Go to billing page to complete the upgrade, then return to finish setup
+      window.location.href = "/app/billing";
+    } else {
+      onNext();
+    }
+  };
 
   return (
     <div style={{ maxWidth: 580, margin: "0 auto" }}>
@@ -278,23 +289,26 @@ function Step2({ plan, onBack, onNext }: { plan: PlanKey; onBack: () => void; on
           display: "grid",
           gridTemplateColumns: "1fr 1fr",
           gap: 12,
-          marginBottom: 28,
+          marginBottom: 20,
         }}
       >
         {planList.map(([key, p]) => {
-          const isCurrent = key === plan;
+          const isSelected = key === selected;
           return (
             <div
               key={key}
+              onClick={() => setSelected(key)}
               style={{
                 padding: "16px 18px",
                 borderRadius: 10,
-                border: isCurrent ? "2px solid #008060" : "1px solid #e4e5e7",
-                background: isCurrent ? "#f4fff8" : "#fff",
+                border: isSelected ? "2px solid #008060" : "1px solid #e4e5e7",
+                background: isSelected ? "#f4fff8" : "#fff",
                 position: "relative",
+                cursor: "pointer",
+                transition: "border-color 0.15s, background 0.15s",
               }}
             >
-              {isCurrent && (
+              {isSelected && (
                 <span
                   style={{
                     position: "absolute",
@@ -310,13 +324,13 @@ function Step2({ plan, onBack, onNext }: { plan: PlanKey; onBack: () => void; on
                     whiteSpace: "nowrap",
                   }}
                 >
-                  CURRENT PLAN
+                  {key === plan ? "CURRENT PLAN" : "SELECTED"}
                 </span>
               )}
               <div style={{ fontWeight: 800, fontSize: 14, color: "#1a1a1a", marginBottom: 2 }}>
                 {p.name}
               </div>
-              <div style={{ fontSize: 22, fontWeight: 900, color: isCurrent ? "#008060" : "#1a1a1a", margin: "4px 0 2px" }}>
+              <div style={{ fontSize: 22, fontWeight: 900, color: isSelected ? "#008060" : "#1a1a1a", margin: "4px 0 2px" }}>
                 {p.price === 0 ? "Free" : `$${p.price}`}
                 {p.price > 0 && <span style={{ fontSize: 12, fontWeight: 500, color: "#6d7175" }}>/mo</span>}
               </div>
@@ -328,24 +342,23 @@ function Step2({ plan, onBack, onNext }: { plan: PlanKey; onBack: () => void; on
         })}
       </div>
 
-      <div
-        style={{
-          padding: "14px 16px",
-          borderRadius: 8,
-          background: "#f6f6f7",
-          border: "1px solid #e4e5e7",
-          fontSize: 13,
-          color: "#6d7175",
-          marginBottom: 28,
-          textAlign: "center",
-        }}
-      >
-        Want to upgrade?{" "}
-        <a href="/app/billing" style={{ color: "#008060", fontWeight: 700, textDecoration: "none" }}>
-          Open billing page →
-        </a>{" "}
-        You can return to finish setup anytime.
-      </div>
+      {isPaid && (
+        <div
+          style={{
+            padding: "12px 16px",
+            borderRadius: 8,
+            background: "#f0faf6",
+            border: "1px solid #d3f5e5",
+            fontSize: 13,
+            color: "#1a4731",
+            marginBottom: 20,
+            textAlign: "center",
+          }}
+        >
+          You'll complete the <strong>${PLANS[selected].price}/mo</strong> upgrade on the billing page,
+          then return here to finish setup.
+        </div>
+      )}
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <button
@@ -355,10 +368,10 @@ function Step2({ plan, onBack, onNext }: { plan: PlanKey; onBack: () => void; on
           ← Back
         </button>
         <button
-          onClick={onNext}
+          onClick={handleContinue}
           style={{ padding: "10px 24px", borderRadius: 6, background: "#008060", color: "#fff", fontWeight: 700, fontSize: 14, border: "none", cursor: "pointer" }}
         >
-          Continue with {PLANS[plan].name} →
+          {isPaid ? `Upgrade to ${PLANS[selected].name} →` : `Continue with Free →`}
         </button>
       </div>
     </div>
