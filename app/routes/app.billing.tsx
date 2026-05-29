@@ -55,6 +55,9 @@ const CANCEL_SUBSCRIPTION = `#graphql
 const GET_ACTIVE_SUBSCRIPTIONS = `#graphql
   query GetActiveSubscriptions {
     currentAppInstallation {
+      app {
+        handle
+      }
       activeSubscriptions {
         id
         name
@@ -126,12 +129,21 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   // Read subscription from DB and sync with Shopify's actual billing state
   let sub = await getSubscription(shop);
+  let managedPricingUrl: string | null = null;
   try {
     const res = await admin.graphql(GET_ACTIVE_SUBSCRIPTIONS);
     const { data } = await res.json();
-    const activeSubs = (data?.currentAppInstallation?.activeSubscriptions ?? []) as Array<{
+    const installation = data?.currentAppInstallation;
+    const activeSubs = (installation?.activeSubscriptions ?? []) as Array<{
       id: string; name: string; status: string;
     }>;
+
+    // Build the Shopify admin billing URL for this app using the app handle
+    const appHandle = installation?.app?.handle as string | null;
+    if (appHandle) {
+      const shopHandle = shop.replace(".myshopify.com", "");
+      managedPricingUrl = `https://admin.shopify.com/store/${shopHandle}/settings/apps/app_installations/app/${appHandle}`;
+    }
 
     if (activeSubs.length === 0) {
       // Shopify has no active subscription — if DB shows a paid plan, reset to free
@@ -173,6 +185,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     limit,
     usagePct,
     billingDeclined: billingStatus === "declined",
+    managedPricingUrl,
   };
 };
 
@@ -233,16 +246,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (result?.userErrors?.length > 0) {
     const errMsg = result.userErrors[0].message as string;
-    // Managed Pricing apps can't use the Billing API — redirect merchant to Shopify admin
+    // Managed Pricing apps can't use the Billing API — signal the UI to redirect
     if (errMsg.includes("Managed Pricing") || errMsg.includes("managed pricing")) {
-      const shopHandle = shop.replace(".myshopify.com", "");
-      const apiKey = process.env.SHOPIFY_API_KEY ?? "";
-      return {
-        confirmationUrl: null,
-        error: null,
-        devActivated: null,
-        managedPricingUrl: `https://admin.shopify.com/store/${shopHandle}/apps/${apiKey}`,
-      };
+      return { confirmationUrl: null, error: null, devActivated: null, managedPricing: true };
     }
     return { confirmationUrl: null, error: errMsg, devActivated: null };
   }
@@ -287,7 +293,7 @@ const FEATURES: Record<PlanKey, string[]> = {
 // ─── Billing page ─────────────────────────────────────────────────────────────
 
 export default function BillingPage() {
-  const { plan: currentPlan, status, hasActiveSubscription, ordersThisMonth, limit, usagePct, billingDeclined } =
+  const { plan: currentPlan, status, hasActiveSubscription, ordersThisMonth, limit, usagePct, billingDeclined, managedPricingUrl } =
     useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const shopify = useAppBridge();
@@ -303,14 +309,13 @@ export default function BillingPage() {
     }
   }, [fetcher.data]);
 
-  // For Managed Pricing apps, redirect to Shopify admin to select a plan
+  // For Managed Pricing apps, redirect to the Shopify admin app billing page
   useEffect(() => {
-    const url = fetcher.data?.managedPricingUrl;
-    if (url) {
+    if (fetcher.data?.managedPricing && managedPricingUrl) {
       shopify.toast.show("Opening Shopify billing — select your plan there.");
-      (window.top ?? window).location.href = url;
+      (window.top ?? window).location.href = managedPricingUrl;
     }
-  }, [fetcher.data, shopify]);
+  }, [fetcher.data, managedPricingUrl, shopify]);
 
   // Show toast on successful downgrade to free
   useEffect(() => {
