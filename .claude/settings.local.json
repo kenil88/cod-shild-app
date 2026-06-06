@@ -25,5 +25,8 @@
       "Bash(xargs grep -l \"useParams\\\\|dynamic route\")",
       "Bash(xargs grep -l \"RecurringApplicationCharge\\\\|appSubscriptionCreate\\\\|appSubscriptionCancel\")"
     ]
-  }
+  },
+  "enabledMcpjsonServers": [
+    "shopify-dev-mcp"
+  ]
 }
