@@ -24,7 +24,17 @@
       "Bash(xargs grep -l \"codOrderId\\\\|CodOrder\")",
       "Bash(xargs grep -l \"useParams\\\\|dynamic route\")",
       "Bash(xargs grep -l \"RecurringApplicationCharge\\\\|appSubscriptionCreate\\\\|appSubscriptionCancel\")",
-      "mcp__shopify-dev-mcp__search_docs_chunks"
+      "mcp__shopify-dev-mcp__search_docs_chunks",
+      "Bash(mkdir -p \"D:\\\\wamp64\\\\www\\\\cod-shild-app\\\\extensions\\\\cod-hide-payment\\\\src\")",
+      "Bash(mkdir -p \"D:\\\\wamp64\\\\www\\\\cod-shild-app\\\\extensions\\\\cod-hide-payment\\\\generated\")",
+      "Bash(Get-Item \"D:\\\\wamp64\\\\www\\\\cod-shild-app\\\\app\\\\routes\\\\app.cod-visibility.tsx\")",
+      "Bash(Select-Object Name, Length)",
+      "Bash(Get-Item \"D:\\\\wamp64\\\\www\\\\cod-shild-app\\\\app\\\\routes\\\\app.tsx\")",
+      "Bash(git commit *)",
+      "Bash(railway status *)",
+      "PowerShell(railway status *)",
+      "PowerShell(npm install *)",
+      "PowerShell(railway whoami *)"
     ]
   },
   "enabledMcpjsonServers": [
