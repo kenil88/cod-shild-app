@@ -23,7 +23,8 @@
       "Bash(git push *)",
       "Bash(xargs grep -l \"codOrderId\\\\|CodOrder\")",
       "Bash(xargs grep -l \"useParams\\\\|dynamic route\")",
-      "Bash(xargs grep -l \"RecurringApplicationCharge\\\\|appSubscriptionCreate\\\\|appSubscriptionCancel\")"
+      "Bash(xargs grep -l \"RecurringApplicationCharge\\\\|appSubscriptionCreate\\\\|appSubscriptionCancel\")",
+      "mcp__shopify-dev-mcp__search_docs_chunks"
     ]
   },
   "enabledMcpjsonServers": [
