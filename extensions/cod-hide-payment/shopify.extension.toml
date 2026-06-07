@@ -1,10 +1,21 @@
-api_version = "2026-07"
+api_version = "2026-04"
 
 [[extensions]]
-type = "payment_customization"
-name = "COD Hide Payment"
+name = "t:name"
 handle = "cod-hide-payment"
+type = "function"
+uid = "a114a485-d76a-eec8-ee63-9c29fce51a58e872c21a"
+description = "t:description"
 
-[[extensions.targeting]]
-module = "./src/run.ts"
-target = "purchase.payment-customization.run"
+  [[extensions.targeting]]
+  target = "cart.payment-methods.transform.run"
+  input_query = "src/cart_payment_methods_transform_run.graphql"
+  export = "cart-payment-methods-transform-run"
+
+  [extensions.build]
+  command = "npm run build"
+  path = "dist/function.wasm"
+
+  [extensions.ui.paths]
+  create = "/"
+  details = "/"

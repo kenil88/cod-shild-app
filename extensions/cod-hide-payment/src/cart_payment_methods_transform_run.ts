@@ -1,8 +1,8 @@
-import type { RunInput, FunctionRunResult } from "../generated/api";
+import type {
+  CartPaymentMethodsTransformRunInput,
+  CartPaymentMethodsTransformRunResult,
+} from "../generated/api";
 
-// Case-insensitive substrings used to identify the COD payment method.
-// Shopify doesn't expose a typed "method kind" field, so name matching is the
-// only available strategy.
 const COD_PATTERNS = [
   "cash on delivery",
   "cash-on-delivery",
@@ -12,26 +12,21 @@ const COD_PATTERNS = [
 
 interface CodHideConfig {
   enabled: boolean;
-  /** 6-digit India pincodes (or any postal code strings) to block COD on */
   blocked_pincodes: string[];
-  /** Shopify Product GIDs — if any are in the cart, hide COD */
   blocked_product_ids: string[];
-  /** Hide COD when cart total is STRICTLY ABOVE this value (null = rule inactive) */
   cart_max: number | null;
-  /** Hide COD when cart total is STRICTLY BELOW this value (null = rule inactive) */
   cart_min: number | null;
 }
 
-export function run(input: RunInput): FunctionRunResult {
-  // No metafield → feature not yet configured → fail-open
+export function cartPaymentMethodsTransformRun(
+  input: CartPaymentMethodsTransformRunInput
+): CartPaymentMethodsTransformRunResult {
   const raw = input.paymentCustomization.metafield;
   if (!raw) return { operations: [] };
 
   const config = raw.jsonValue as CodHideConfig;
   if (!config?.enabled) return { operations: [] };
 
-  // Find the COD method by name. We take the first match; a store is unlikely
-  // to have more than one COD gateway.
   const codMethod = input.paymentMethods.find((m) =>
     COD_PATTERNS.some((p) => m.name.toLowerCase().includes(p))
   );
@@ -82,8 +77,8 @@ export function run(input: RunInput): FunctionRunResult {
   return { operations: [] };
 }
 
-function hideCod(paymentMethodId: string): FunctionRunResult {
-  return { operations: [{ hide: { paymentMethodId } }] };
+function hideCod(paymentMethodId: string): CartPaymentMethodsTransformRunResult {
+  return { operations: [{ paymentMethodHide: { paymentMethodId } }] };
 }
 
 /*

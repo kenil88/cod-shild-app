@@ -1,0 +1,4 @@
+{
+  "name": "COD Hide Payment",
+  "description": "Hides Cash on Delivery at checkout based on pincode, product, or cart total rules."
+}
