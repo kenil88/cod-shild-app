@@ -1,0 +1,33 @@
+query RunInput {
+  cart {
+    cost {
+      totalAmount {
+        amount
+      }
+    }
+    lines {
+      merchandise {
+        __typename
+        ... on ProductVariant {
+          product {
+            id
+          }
+        }
+      }
+    }
+    deliveryGroups {
+      deliveryAddress {
+        zip
+      }
+    }
+  }
+  paymentMethods {
+    id
+    name
+  }
+  paymentCustomization {
+    metafield(namespace: "$app:payment-customization", key: "cod-hide-rules") {
+      jsonValue
+    }
+  }
+}

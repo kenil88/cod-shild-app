@@ -41,6 +41,23 @@ const SHOP_OWNER_QUERY = `#graphql
   }
 `;
 
+const GET_PAYMENT_CUSTOMIZATIONS = `#graphql
+  query GetPaymentCustomizations {
+    paymentCustomizations(first: 25) {
+      edges { node { id title } }
+    }
+  }
+`;
+
+const CREATE_PAYMENT_CUSTOMIZATION = `#graphql
+  mutation CreatePaymentCustomization($input: PaymentCustomizationInput!) {
+    paymentCustomizationCreate(paymentCustomization: $input) {
+      paymentCustomization { id }
+      userErrors { field message }
+    }
+  }
+`;
+
 // ─── Action ───────────────────────────────────────────────────────────────────
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -96,6 +113,27 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
     } catch (err) {
       console.error("[COD King] Welcome email failed:", err);
+    }
+
+    // Activate the COD Hide Payment customization function (best-effort).
+    // Skipped when the function hasn't been deployed yet (env var not set).
+    const functionId = process.env.SHOPIFY_COD_HIDE_PAYMENT_ID;
+    if (functionId) {
+      try {
+        // Idempotency: skip if a customization with this title already exists
+        const existingRes = await admin.graphql(GET_PAYMENT_CUSTOMIZATIONS);
+        const { data: existingData } = await existingRes.json();
+        const alreadyExists = (existingData?.paymentCustomizations?.edges ?? []).some(
+          (e: { node: { title: string } }) => e.node.title === "COD Hide Payment"
+        );
+        if (!alreadyExists) {
+          await admin.graphql(CREATE_PAYMENT_CUSTOMIZATION, {
+            variables: { input: { title: "COD Hide Payment", enabled: true, functionId } },
+          });
+        }
+      } catch (err) {
+        console.error("[COD Shield] Payment customization activation failed:", err);
+      }
     }
   }
 

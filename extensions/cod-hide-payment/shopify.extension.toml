@@ -1,0 +1,10 @@
+api_version = "2026-07"
+
+[[extensions]]
+type = "payment_customization"
+name = "COD Hide Payment"
+handle = "cod-hide-payment"
+
+[[extensions.targeting]]
+module = "./src/run.ts"
+target = "purchase.payment-customization.run"

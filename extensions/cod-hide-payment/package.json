@@ -1,0 +1,9 @@
+{
+  "name": "cod-hide-payment",
+  "version": "1.0.0",
+  "description": "Hides Cash on Delivery at checkout based on pincode, product, and cart total rules",
+  "scripts": {
+    "build": "shopify app function build",
+    "typegen": "shopify app function typegen"
+  }
+}
